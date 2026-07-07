@@ -14,7 +14,7 @@ const app = buildApp({
 
 app
   .listen({ port: config.port, host: '0.0.0.0' })
-  .then((address) => app.log.info(`Savr extraction server listening on ${address}`))
+  .then((address) => app.log.info(`Morsel extraction server listening on ${address}`))
   .catch((err) => {
     app.log.error(err);
     process.exit(1);

@@ -1,4 +1,4 @@
-# Savr extraction backend
+# Morsel extraction backend
 
 Small Fastify service that turns a recipe link into a structured recipe + macros.
 

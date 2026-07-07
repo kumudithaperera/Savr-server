@@ -1,7 +1,7 @@
 {
-  "name": "savr-server",
+  "name": "morsel-server",
   "version": "1.0.0",
-  "description": "Savr extraction backend: Apify Instagram Scraper + Gemini recipe parsing",
+  "description": "Morsel extraction backend: Apify Instagram Scraper + Gemini recipe parsing",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

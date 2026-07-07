@@ -1,6 +1,6 @@
 /**
  * Shared domain types for the extraction backend.
- * These mirror the app-side types in `Savr/lib/recipes/types.ts`.
+ * These mirror the app-side types in `Morsel/lib/recipes/types.ts`.
  * Keep the two in sync when the recipe shape changes.
  */
 
