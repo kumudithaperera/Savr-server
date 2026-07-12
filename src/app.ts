@@ -2,14 +2,17 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { InstagramScraper } from './services/apify.js';
 import type { RecipeParser } from './services/gemini.js';
+import type { RecipeImprover } from './services/improve.js';
 import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { registerExtractRoute } from './routes/extract.js';
+import { registerImproveRoute } from './routes/improve.js';
 
 export interface AppDeps {
   instagramScraper: InstagramScraper;
   webScraper: WebScraper;
   parser: RecipeParser;
+  improver: RecipeImprover;
 }
 
 /**
@@ -22,6 +25,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.get('/health', async () => ({ status: 'ok' }));
 
   registerExtractRoute(app, deps);
+  registerImproveRoute(app, deps);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
