@@ -28,8 +28,13 @@ describe('detectPlatform', () => {
     expect(detectPlatform('https://instagram.com/p/abc/')).toBe('instagram');
   });
 
+  it('detects tiktok links', () => {
+    expect(detectPlatform('https://www.tiktok.com/@x/video/1')).toBe('tiktok');
+    expect(detectPlatform('https://tiktok.com/@x/video/1')).toBe('tiktok');
+    expect(detectPlatform('https://vm.tiktok.com/ZMabc123/')).toBe('tiktok');
+  });
+
   it('treats other hosts as web', () => {
     expect(detectPlatform('https://cooking.nytimes.com/recipes/123')).toBe('web');
-    expect(detectPlatform('https://tiktok.com/@x/video/1')).toBe('web');
   });
 });

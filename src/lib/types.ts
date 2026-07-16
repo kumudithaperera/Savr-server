@@ -9,7 +9,7 @@ export type Category = (typeof CATEGORIES)[number];
 
 export type MacroSource = 'caption' | 'estimated';
 
-export type SourcePlatform = 'instagram' | 'web';
+export type SourcePlatform = 'instagram' | 'tiktok' | 'web';
 
 export interface Macros {
   /** kcal per serving */

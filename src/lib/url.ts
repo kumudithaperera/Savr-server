@@ -2,6 +2,13 @@ import { badRequest } from './errors.js';
 import type { SourcePlatform } from './types.js';
 
 const INSTAGRAM_HOSTS = ['instagram.com', 'www.instagram.com', 'instagr.am'];
+const TIKTOK_HOSTS = [
+  'tiktok.com',
+  'www.tiktok.com',
+  'm.tiktok.com',
+  'vm.tiktok.com',
+  'vt.tiktok.com',
+];
 
 /**
  * Validates that `raw` is a well-formed http(s) URL. Throws a 400 HttpError
@@ -26,5 +33,7 @@ export function assertHttpUrl(raw: unknown): string {
 /** Determines which extraction flow a URL should use based on its host. */
 export function detectPlatform(url: string): SourcePlatform {
   const host = new URL(url).hostname.toLowerCase();
-  return INSTAGRAM_HOSTS.includes(host) ? 'instagram' : 'web';
+  if (INSTAGRAM_HOSTS.includes(host)) return 'instagram';
+  if (TIKTOK_HOSTS.includes(host)) return 'tiktok';
+  return 'web';
 }

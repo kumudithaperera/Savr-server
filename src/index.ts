@@ -3,15 +3,18 @@ import { loadConfig } from './config.js';
 import { createApifyInstagramScraper } from './services/apify.js';
 import { createGeminiRecipeParser } from './services/gemini.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
+import { createApifyTikTokScraper } from './services/tiktok.js';
 import { createWebScraper } from './services/web.js';
 
 const config = loadConfig();
 
 const app = buildApp({
   instagramScraper: createApifyInstagramScraper(config),
+  tiktokScraper: createApifyTikTokScraper(config),
   webScraper: createWebScraper(),
   parser: createGeminiRecipeParser(config),
   improver: createGeminiRecipeImprover(config),
+  appSharedSecret: config.appSharedSecret,
 });
 
 app
