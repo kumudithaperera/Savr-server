@@ -3,9 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildApp, type AppDeps } from './app.js';
 import type { ScrapedPost } from './lib/types.js';
 
-/** A scraper stub that records it was called and returns a fixed caption. */
-function stubScraper(caption: string) {
-  return { scrape: vi.fn(async (): Promise<ScrapedPost> => ({ caption })) };
+/**
+ * A scraper stub that records it was called and returns a fixed caption.
+ * `shortcode` mirrors the real scrapers, which report the platform's own id
+ * (Instagram shortCode / TikTok video id) - the route uses it to alias short
+ * links to their canonical entry.
+ */
+function stubScraper(caption: string, shortcode?: string) {
+  return { scrape: vi.fn(async (): Promise<ScrapedPost> => ({ caption, shortcode })) };
 }
 
 const parsed = {
@@ -21,7 +26,7 @@ const parsed = {
 function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     instagramScraper: stubScraper('ig'),
-    tiktokScraper: stubScraper('tt'),
+    tiktokScraper: stubScraper('tt', '7412345678901234567'),
     webScraper: stubScraper('web'),
     parser: { parse: vi.fn(async () => parsed) },
     improver: {} as AppDeps['improver'],
@@ -126,6 +131,95 @@ describe('extraction cache', () => {
     const cached = await extract(app, TIKTOK(1));
 
     expect(cached.statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+describe('canonical cache keys', () => {
+  const IG = 'https://www.instagram.com/reel/ABC123/';
+
+  it('treats the ways one reel gets shared as a single extraction', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    const bare = await extract(app, IG);
+    const shared = await extract(app, `${IG}?igsh=MzRlODBiNWFl`);
+    const copied = await extract(app, 'https://instagram.com/reel/ABC123?utm_source=ig_web_copy');
+
+    expect([bare.statusCode, shared.statusCode, copied.statusCode]).toEqual([200, 200, 200]);
+    // The whole point: one paid extraction, not three.
+    expect(deps.instagramScraper.scrape).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it('charges quota only for the first of those', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 1 } });
+
+    expect((await extract(app, IG)).statusCode).toBe(200);
+    // Would be over quota if the tagged variant counted as a second extraction.
+    expect((await extract(app, `${IG}?igsh=xyz`)).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('returns the caller their own link, not the first extractor\'s', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    await extract(app, IG);
+    const tagged = `${IG}?igsh=MzRlODBiNWFl`;
+    const res = await extract(app, tagged);
+
+    // Otherwise the app would save a recipe whose source link isn't the one
+    // pasted, breaking its local duplicate detection later.
+    expect(res.json().sourceUrl).toBe(tagged);
+    await app.close();
+  });
+
+  it('lets a TikTok short link and the full URL share one entry', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    // The stub scraper reports the video id, as the real one does.
+    const short = await extract(app, 'https://vm.tiktok.com/ZMabc123/');
+    const full = await extract(app, 'https://www.tiktok.com/@chef/video/7412345678901234567');
+
+    expect([short.statusCode, full.statusCode]).toEqual([200, 200]);
+    expect(deps.tiktokScraper.scrape).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it('still separates genuinely different posts', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    await extract(app, 'https://www.instagram.com/reel/AAA/');
+    await extract(app, 'https://www.instagram.com/reel/BBB/');
+
+    expect(deps.instagramScraper.scrape).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+});
+
+describe('cache statistics', () => {
+  it('reports hits, misses and hit rate on /health', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    await extract(app, 'https://www.instagram.com/reel/STATS1/'); // miss
+    await extract(app, 'https://www.instagram.com/reel/STATS1/?igsh=x'); // hit
+    await extract(app, 'https://www.instagram.com/reel/STATS2/'); // miss
+
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.json().cache).toMatchObject({ hits: 1, misses: 2 });
+    expect(health.json().cache.hitRate).toBeCloseTo(0.33, 2);
+    await app.close();
+  });
+
+  it('reports a null hit rate before any traffic', async () => {
+    const app = buildApp(makeDeps());
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.json().cache).toMatchObject({ hits: 0, misses: 0, hitRate: null });
     await app.close();
   });
 });

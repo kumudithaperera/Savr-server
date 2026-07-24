@@ -62,7 +62,15 @@ export interface Config {
   /** Per-IP fixed-window rate limit on the protected routes. */
   ipRateLimitMax: number;
   ipRateLimitWindowMs: number;
-  /** How long a successful extraction is reused for an identical link. */
+  /**
+   * How long a successful extraction is reused for the same post. Keyed on the
+   * post's canonical id, so every way a link gets shared hits one entry.
+   *
+   * Long by design: recipe text never goes stale and storage is not a
+   * constraint (256 MB holds ~128k recipes). The one thing that does decay is
+   * the photo - Instagram/TikTok image URLs are time-signed and eventually
+   * 404 - but the app falls back to a Pexels image when a download fails.
+   */
   extractCacheTtlDays: number;
 }
 
@@ -90,6 +98,6 @@ export function loadConfig(): Config {
     globalDailyExtractionLimit: numberFromEnv('GLOBAL_DAILY_EXTRACTION_LIMIT', 50),
     ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
     ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),
-    extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 30),
+    extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 365),
   };
 }

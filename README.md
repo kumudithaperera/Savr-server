@@ -69,10 +69,24 @@ Two things shape how these behave:
 - **Only Instagram and TikTok links are metered.** Web & blog imports are
   unlimited on every plan, so they skip the quota and the circuit breaker
   entirely. This mirrors `isMeteredExtractionUrl` in the app.
-- **Identical links are cached for 30 days.** A cache hit is served without
-  touching Apify or Gemini and costs the caller nothing, so it never consumes
-  quota or daily budget. This is the single biggest cost reducer once several
-  people save the same viral reel.
+- **The same post is cached for a year, however its link was shared.** A cache
+  hit is served without touching Apify or Gemini and costs the caller nothing,
+  so it never consumes quota or daily budget. This is the single biggest cost
+  reducer once several people save the same viral reel.
+
+  Entries are keyed on the post's **canonical identity**, not the URL text
+  (`canonicalCacheKey` in `lib/url.ts`): `ig:<shortcode>` for Instagram,
+  `tt:<videoId>` for TikTok, and for web links the host and path with known
+  tracking parameters stripped. Without this, `?igsh=…`, `?utm_source=…` and a
+  bare link would be three separate paid extractions of one reel - and in
+  practice social apps append those parameters to almost every shared link.
+
+  TikTok short links (`vm.tiktok.com/…`) carry no video id, so they cannot be
+  canonicalised up front. Instead, after a cold extraction the recipe is also
+  written under the id the scraper returns (`ScrapedPost.shortcode`), so the
+  next person pasting the full URL still gets a free hit.
+
+  `GET /health` reports this month's `hits`, `misses` and `hitRate`.
 
 The per-install quota is keyed on the `x-morsel-device-id` header, a hash of
 `ANDROID_ID` that survives uninstall/reinstall (see `Morsel/lib/device/id.ts`).

@@ -8,14 +8,14 @@ import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
-import { registerExtractRoute, type ExtractLimits } from './routes/extract.js';
+import { registerExtractRoute, statsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImproveRoute } from './routes/improve.js';
 
 /** Limits with the same defaults as `config.ts`, so tests need not supply them. */
 const DEFAULT_LIMITS: ExtractLimits = {
   monthlyDeviceExtractionLimit: 30,
   globalDailyExtractionLimit: 50,
-  extractCacheTtlDays: 30,
+  extractCacheTtlDays: 365,
 };
 
 export interface AppDeps {
@@ -57,7 +57,29 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // outside: store calls fail open, so a misconfigured Upstash otherwise looks
   // exactly like a healthy server that happens to enforce nothing. Absent field
   // = an older build is still running. No credentials are exposed.
-  app.get('/health', async () => ({ status: 'ok', store: store.kind }));
+  //
+  // `cache` is this month's hit rate. On the free Apify tier that number decides
+  // how far $5 stretches: every hit is an extraction nobody paid for.
+  app.get('/health', async () => {
+    const now = new Date();
+    const [hits, misses] = await Promise.all([
+      store.getJson<number>(statsKey('hit', now)),
+      store.getJson<number>(statsKey('miss', now)),
+    ]);
+    const hit = hits ?? 0;
+    const miss = misses ?? 0;
+    const total = hit + miss;
+    return {
+      status: 'ok',
+      store: store.kind,
+      cache: {
+        month: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`,
+        hits: hit,
+        misses: miss,
+        hitRate: total === 0 ? null : Math.round((hit / total) * 100) / 100,
+      },
+    };
+  });
 
   registerExtractRoute(app, { ...deps, store, limits });
   registerImproveRoute(app, deps);

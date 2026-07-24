@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assertHttpUrl, detectPlatform } from './url.js';
+import { assertHttpUrl, cacheKeyFromShortcode, canonicalCacheKey, detectPlatform } from './url.js';
 import { HttpError } from './errors.js';
 
 describe('assertHttpUrl', () => {
@@ -36,5 +36,81 @@ describe('detectPlatform', () => {
 
   it('treats other hosts as web', () => {
     expect(detectPlatform('https://cooking.nytimes.com/recipes/123')).toBe('web');
+  });
+});
+
+describe('canonicalCacheKey', () => {
+  const ig = (u: string) => canonicalCacheKey(u, 'instagram');
+  const tt = (u: string) => canonicalCacheKey(u, 'tiktok');
+  const web = (u: string) => canonicalCacheKey(u, 'web');
+
+  it('collapses the ways one Instagram reel gets shared', () => {
+    const bare = ig('https://www.instagram.com/reel/ABC123/');
+    expect(ig('https://www.instagram.com/reel/ABC123/?igsh=MzRlODBiNWFl')).toBe(bare);
+    expect(ig('https://instagram.com/reel/ABC123/?utm_source=ig_web_copy_link')).toBe(bare);
+    expect(ig('https://www.instagram.com/reel/ABC123')).toBe(bare);
+    expect(bare).toBe('ig:ABC123');
+  });
+
+  it('handles the other Instagram post shapes', () => {
+    expect(ig('https://www.instagram.com/p/XYZ789/')).toBe('ig:XYZ789');
+    expect(ig('https://www.instagram.com/tv/XYZ789/')).toBe('ig:XYZ789');
+    expect(ig('https://www.instagram.com/share/reel/XYZ789/')).toBe('ig:XYZ789');
+  });
+
+  it('reduces TikTok links to the video id', () => {
+    const bare = tt('https://www.tiktok.com/@chef/video/7412345678901234567');
+    expect(
+      tt('https://www.tiktok.com/@chef/video/7412345678901234567?is_from_webapp=1&sender_device=pc'),
+    ).toBe(bare);
+    // A different account path for the same video id is still the same video.
+    expect(tt('https://m.tiktok.com/@other/video/7412345678901234567')).toBe(bare);
+    expect(bare).toBe('tt:7412345678901234567');
+  });
+
+  it('keeps TikTok short links distinct until the scraper resolves them', () => {
+    expect(tt('https://vm.tiktok.com/ZMabc123/')).toBe('tt:short:/ZMabc123');
+    expect(tt('https://vm.tiktok.com/ZMabc123')).toBe('tt:short:/ZMabc123');
+  });
+
+  it('strips tracking junk from web links but keeps meaningful params', () => {
+    expect(web('https://example.com/recipes?utm_source=x&recipe=123')).toBe(
+      'web:example.com/recipes?recipe=123',
+    );
+    // Param order must not create two entries for one page.
+    expect(web('https://example.com/r?b=2&a=1')).toBe(web('https://example.com/r?a=1&b=2'));
+  });
+
+  it('collapses www and trailing-slash variants of a web link', () => {
+    const bare = web('https://example.com/recipes/pasta');
+    expect(web('https://www.example.com/recipes/pasta/')).toBe(bare);
+    expect(web('https://EXAMPLE.com/recipes/pasta')).toBe(bare);
+  });
+
+  it('falls back rather than throwing on an unparseable url', () => {
+    expect(canonicalCacheKey('not a url', 'web')).toBe('raw:not a url');
+  });
+
+  it('does not collapse genuinely different posts', () => {
+    expect(ig('https://www.instagram.com/reel/AAA/')).not.toBe(
+      ig('https://www.instagram.com/reel/BBB/'),
+    );
+    expect(web('https://example.com/a')).not.toBe(web('https://example.com/b'));
+  });
+});
+
+describe('cacheKeyFromShortcode', () => {
+  it('builds the same key the URL parser would', () => {
+    expect(cacheKeyFromShortcode('instagram', 'ABC123')).toBe(
+      canonicalCacheKey('https://www.instagram.com/reel/ABC123/', 'instagram'),
+    );
+    expect(cacheKeyFromShortcode('tiktok', '7412345678901234567')).toBe(
+      canonicalCacheKey('https://www.tiktok.com/@c/video/7412345678901234567', 'tiktok'),
+    );
+  });
+
+  it('returns null when there is no usable id', () => {
+    expect(cacheKeyFromShortcode('web', 'anything')).toBeNull();
+    expect(cacheKeyFromShortcode('instagram', undefined)).toBeNull();
   });
 });

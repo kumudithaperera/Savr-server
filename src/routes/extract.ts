@@ -10,7 +10,12 @@ import { atCapacity, quotaExceeded } from '../lib/errors.js';
 import { normalizeRecipe } from '../lib/normalize.js';
 import type { Store } from '../lib/store.js';
 import type { ExtractedRecipe } from '../lib/types.js';
-import { assertHttpUrl, detectPlatform } from '../lib/url.js';
+import {
+  assertHttpUrl,
+  cacheKeyFromShortcode,
+  canonicalCacheKey,
+  detectPlatform,
+} from '../lib/url.js';
 
 const DEVICE_ID_HEADER = 'x-morsel-device-id';
 
@@ -50,10 +55,18 @@ function isMetered(platform: ReturnType<typeof detectPlatform>): boolean {
   return platform === 'instagram' || platform === 'tiktok';
 }
 
-/** Stable per-URL cache key. Hashed to keep keys short and opaque. */
-function cacheKey(url: string): string {
-  return `cache:extract:${createHash('sha256').update(url).digest('hex')}`;
+/**
+ * Cache key for a canonical post identity (see `canonicalCacheKey`). Hashed to
+ * keep keys short and opaque.
+ */
+function cacheKey(canonical: string): string {
+  return `cache:extract:${createHash('sha256').update(canonical).digest('hex')}`;
 }
+
+/** Monthly cache hit/miss counters, so the cache's payoff is measurable. */
+const STATS_TTL_SECONDS = 60 * 24 * 60 * 60;
+export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
+  `stats:${kind}:${monthKey(now)}`;
 
 /**
  * The calling install, as sent by the app (a hashed ANDROID_ID). Unauthenticated
@@ -93,18 +106,26 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
   app.post<{ Body: { url?: unknown } }>('/extract', async (request) => {
     const url = assertHttpUrl(request.body?.url);
     const platform = detectPlatform(url);
+    const now = new Date();
+
+    // Key on the post's identity, not the link's text: the same reel shared
+    // three ways is one cache entry, so the first extraction serves everyone.
+    const canonical = canonicalCacheKey(url, platform);
 
     // A cache hit costs nothing, so it must not consume the caller's quota or
     // the daily budget. This is also what neuters "hammer one link" abuse.
-    const cached = await store.getJson<ExtractedRecipe>(cacheKey(url));
+    const cached = await store.getJson<ExtractedRecipe>(cacheKey(canonical));
     if (cached) {
-      request.log.info({ url, platform, cacheHit: true }, 'extract served from cache');
-      return cached;
+      request.log.info({ url, canonical, platform, cacheHit: true }, 'extract served from cache');
+      await store.incrWithTtl(statsKey('hit', now), STATS_TTL_SECONDS);
+      // Hand back the caller's own link rather than whoever extracted it first,
+      // so their local duplicate detection matches what they actually pasted.
+      return { ...cached, sourceUrl: url };
     }
+    await store.incrWithTtl(statsKey('miss', now), STATS_TTL_SECONDS);
 
     const metered = isMetered(platform);
     const deviceId = deviceIdOf(request);
-    const now = new Date();
 
     if (metered) {
       // Global ceiling first: when the service is out of budget for the day,
@@ -131,7 +152,15 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     const parsed = await deps.parser.parse(scraped.caption);
     const recipe = normalizeRecipe(url, platform, scraped, parsed);
 
-    await store.setJson(cacheKey(url), recipe, cacheTtlSeconds);
+    await store.setJson(cacheKey(canonical), recipe, cacheTtlSeconds);
+
+    // A short link (vm.tiktok.com/…) can't be canonicalised before scraping,
+    // but the scraper hands back the platform's own id. Writing an alias under
+    // that id means the next person who pastes the full URL gets a free hit.
+    const alias = cacheKeyFromShortcode(platform, scraped.shortcode);
+    if (alias && alias !== canonical) {
+      await store.setJson(cacheKey(alias), recipe, cacheTtlSeconds);
+    }
     // Charged only on success, so a failed extraction never burns an allowance.
     // The global counter above is incremented up front instead, because a failed
     // attempt still costs us money upstream.
