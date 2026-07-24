@@ -79,3 +79,114 @@ describe('guardrail', () => {
     await app.close();
   });
 });
+
+// --- metering -------------------------------------------------------------
+
+/** POSTs a link to /extract as a given install. */
+function extract(app: ReturnType<typeof buildApp>, url: string, deviceId = 'device-a') {
+  return app.inject({
+    method: 'POST',
+    url: '/extract',
+    headers: { 'x-morsel-device-id': deviceId },
+    payload: { url },
+  });
+}
+
+const TIKTOK = (n: number) => `https://www.tiktok.com/@x/video/${n}`;
+
+/** Production defaults, narrowed per test to keep cases short. */
+const LIMITS = {
+  monthlyDeviceExtractionLimit: 50,
+  globalDailyExtractionLimit: 200,
+  extractCacheTtlDays: 30,
+};
+
+describe('extraction cache', () => {
+  it('serves an identical link from cache without scraping again', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    const first = await extract(app, TIKTOK(1));
+    const second = await extract(app, TIKTOK(1));
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(deps.tiktokScraper.scrape).toHaveBeenCalledOnce();
+    expect(deps.parser.parse).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it('does not charge quota for a cache hit', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 1 } });
+
+    await extract(app, TIKTOK(1));
+    // The same link again would be the second extraction if it were metered.
+    const cached = await extract(app, TIKTOK(1));
+
+    expect(cached.statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+describe('per-device monthly quota', () => {
+  it('rejects a metered link once the install is over its allowance', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 2 } });
+
+    expect((await extract(app, TIKTOK(1))).statusCode).toBe(200);
+    expect((await extract(app, TIKTOK(2))).statusCode).toBe(200);
+    const third = await extract(app, TIKTOK(3));
+
+    expect(third.statusCode).toBe(429);
+    expect(third.json().code).toBe('quota_exceeded');
+    await app.close();
+  });
+
+  it('meters each install separately', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 1 } });
+
+    await extract(app, TIKTOK(1), 'device-a');
+    expect((await extract(app, TIKTOK(2), 'device-a')).statusCode).toBe(429);
+    expect((await extract(app, TIKTOK(3), 'device-b')).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('leaves web & blog links unlimited', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 1 } });
+
+    await extract(app, TIKTOK(1));
+    expect((await extract(app, TIKTOK(2))).statusCode).toBe(429);
+    // Same install, past the cap: a recipe blog still extracts.
+    const blog = await extract(app, 'https://example.com/recipes/pancakes');
+    expect(blog.statusCode).toBe(200);
+    expect(blog.json().sourcePlatform).toBe('web');
+    await app.close();
+  });
+});
+
+describe('global daily circuit breaker', () => {
+  it('stops metered extractions for everyone once the day is spent', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, globalDailyExtractionLimit: 1 } });
+
+    expect((await extract(app, TIKTOK(1), 'device-a')).statusCode).toBe(200);
+    const overflow = await extract(app, TIKTOK(2), 'device-b');
+
+    expect(overflow.statusCode).toBe(503);
+    expect(overflow.json().code).toBe('at_capacity');
+    await app.close();
+  });
+
+  it('still allows web & blog links at capacity', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, globalDailyExtractionLimit: 1 } });
+
+    await extract(app, TIKTOK(1));
+    expect((await extract(app, 'https://example.com/soup')).statusCode).toBe(200);
+    await app.close();
+  });
+});

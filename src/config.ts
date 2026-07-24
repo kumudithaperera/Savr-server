@@ -32,6 +32,46 @@ export interface Config {
    * the check (fine for local dev); set it in any deployed environment.
    */
   appSharedSecret: string;
+  /**
+   * Upstash Redis REST credentials backing the rate limit, the per-device quota
+   * and the extraction cache. Empty falls back to an in-memory store, which is
+   * fine locally but resets on every cold start — set both in production.
+   */
+  upstashUrl: string;
+  upstashToken: string;
+  /**
+   * AI extractions one install may make per calendar month. Mirrors
+   * `FREE_AI_EXTRACTION_LIMIT` in the app (`Morsel/lib/pricing/data.ts`); only
+   * Instagram/TikTok links count, web & blog imports are unlimited.
+   *
+   * This is the **free** cap and currently applies to everyone: the server has
+   * no notion of entitlements, so a Plus subscriber would be cut off here at 30
+   * despite the plan advertising 200. That is fine only while Plus stays hidden
+   * for the free-only launch. Before enabling paid tiers, verify the caller's
+   * entitlement server-side with `REVENUECAT_SECRET_API_KEY` and pick the cap
+   * from that - never from a client-supplied plan claim, which is forgeable.
+   */
+  monthlyDeviceExtractionLimit: number;
+  /**
+   * Service-wide AI extractions per day. On the free Apify/Gemini tiers this is
+   * not a bill guard (neither can overspend) but an **availability** guard: it
+   * rations a fixed monthly allowance so we can't burn it in the first week and
+   * leave everyone without extraction. See server/README.md for the sizing math.
+   */
+  globalDailyExtractionLimit: number;
+  /** Per-IP fixed-window rate limit on the protected routes. */
+  ipRateLimitMax: number;
+  ipRateLimitWindowMs: number;
+  /** How long a successful extraction is reused for an identical link. */
+  extractCacheTtlDays: number;
+}
+
+/** Reads a positive integer env var, falling back when unset or malformed. */
+function numberFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function loadConfig(): Config {
@@ -44,5 +84,12 @@ export function loadConfig(): Config {
     geminiModel: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
     port: Number(process.env.PORT ?? 3000),
     appSharedSecret: process.env.APP_SHARED_SECRET ?? '',
+    upstashUrl: process.env.UPSTASH_REDIS_REST_URL ?? '',
+    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN ?? '',
+    monthlyDeviceExtractionLimit: numberFromEnv('MONTHLY_DEVICE_EXTRACTION_LIMIT', 30),
+    globalDailyExtractionLimit: numberFromEnv('GLOBAL_DAILY_EXTRACTION_LIMIT', 50),
+    ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
+    ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),
+    extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 30),
   };
 }

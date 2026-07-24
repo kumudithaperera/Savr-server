@@ -1,37 +1,36 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
+import type { Store } from './store.js';
+
 /**
  * Lightweight, dependency-free protection for the expensive routes (`/extract`,
  * `/improve`) so random callers can't run up our Apify/Gemini spend:
  *
  *  1. Shared-secret header — the app sends `x-morsel-app-key`; requests without
- *     the matching value are rejected 401. (Baked into the app, so not a true
- *     secret, but it stops trivial `curl` abuse.)
- *  2. Per-IP rate limit — a fixed-window in-memory counter. Fine for the current
- *     single-instance backend; if we ever run multiple instances this becomes
- *     per-instance and should move to a shared store.
+ *     the matching value are rejected 401. (Baked into the app bundle, so not a
+ *     true secret, but it stops trivial `curl` abuse. Play Integrity attestation
+ *     is the real fix — see the extraction-limits roadmap.)
+ *  2. Per-IP rate limit — a fixed window held in the shared store, so it
+ *     survives the cold starts and redeploys of a free Render instance and stays
+ *     correct if we ever run more than one instance.
  *
- * This is intentionally NOT a per-user quota — the 50/mo cap is still enforced
- * client-side (see Morsel/lib/recipes). Full server-authoritative per-user
- * quotas are deferred until there's traction (see the extraction-limits roadmap).
+ * This runs as an `onRequest` hook, which fires *before* body parsing, so it can
+ * only do URL-independent checks. The per-device monthly quota and the global
+ * daily circuit breaker need the link to tell a metered Instagram/TikTok URL
+ * from an unlimited web one, so they live in the extract route instead.
  */
 
 const PROTECTED_PATHS = new Set(['/extract', '/improve']);
 const APP_KEY_HEADER = 'x-morsel-app-key';
 
-interface RateLimitOptions {
+export interface RateLimitOptions {
   /** Max requests allowed per IP within the window. */
   max: number;
   /** Window length in milliseconds. */
   windowMs: number;
 }
 
-const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 60_000 };
-
-interface Bucket {
-  count: number;
-  resetAt: number;
-}
+export const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 60_000 };
 
 /**
  * Builds an `onRequest` hook enforcing the shared secret + per-IP rate limit on
@@ -39,26 +38,16 @@ interface Bucket {
  */
 export function createRequestGuard(
   appSharedSecret: string,
+  store: Store,
   rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT,
 ) {
-  const buckets = new Map<string, Bucket>();
+  const windowSeconds = Math.ceil(rateLimit.windowMs / 1000);
 
-  function rateLimited(ip: string, now: number): boolean {
-    const bucket = buckets.get(ip);
-    if (!bucket || now >= bucket.resetAt) {
-      buckets.set(ip, { count: 1, resetAt: now + rateLimit.windowMs });
-      return false;
-    }
-    bucket.count += 1;
-    return bucket.count > rateLimit.max;
-  }
-
-  // Occasionally evict stale buckets so the map can't grow unbounded.
-  function sweep(now: number): void {
-    if (buckets.size < 1000) return;
-    for (const [ip, bucket] of buckets) {
-      if (now >= bucket.resetAt) buckets.delete(ip);
-    }
+  async function rateLimited(ip: string, now: number): Promise<boolean> {
+    // Bucket by window start so each window gets its own self-expiring key.
+    const windowStart = Math.floor(now / rateLimit.windowMs);
+    const count = await store.incrWithTtl(`rl:ip:${ip}:${windowStart}`, windowSeconds);
+    return count > rateLimit.max;
   }
 
   return async function guard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -73,9 +62,7 @@ export function createRequestGuard(
       }
     }
 
-    const now = Date.now();
-    sweep(now);
-    if (rateLimited(request.ip, now)) {
+    if (await rateLimited(request.ip, Date.now())) {
       await reply
         .status(429)
         .send({ code: 'rate_limited', message: 'Too many requests. Please try again shortly.' });
