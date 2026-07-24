@@ -15,6 +15,13 @@
 
 export interface Store {
   /**
+   * Which backend is in use. Surfaced on `/health` so a deploy can be checked
+   * from outside: because every store call fails open, a missing or wrong
+   * Upstash config otherwise looks identical to a healthy server that simply
+   * isn't enforcing anything.
+   */
+  readonly kind: 'upstash' | 'memory';
+  /**
    * Atomically increments `key` and returns the new count, setting `ttlSeconds`
    * on first write so the window/period expires on its own. Returns 0 if the
    * store is unreachable (fail-open: the caller treats it as "no usage yet").
@@ -67,6 +74,7 @@ function createMemoryStore(): Store {
   }
 
   return {
+    kind: 'memory',
     async incrWithTtl(key, ttlSeconds) {
       const now = Date.now();
       sweep(now);
@@ -126,6 +134,7 @@ function createUpstashStore(config: StoreConfig, warn: Warn): Store {
   }
 
   return {
+    kind: 'upstash',
     async incrWithTtl(key, ttlSeconds) {
       try {
         // EXPIRE ... NX only sets the TTL when the key has none, so the window

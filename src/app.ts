@@ -53,7 +53,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     createRequestGuard(deps.appSharedSecret, store, deps.rateLimit ?? DEFAULT_RATE_LIMIT),
   );
 
-  app.get('/health', async () => ({ status: 'ok' }));
+  // `store` reports which backend is active, so a deploy can be verified from
+  // outside: store calls fail open, so a misconfigured Upstash otherwise looks
+  // exactly like a healthy server that happens to enforce nothing. Absent field
+  // = an older build is still running. No credentials are exposed.
+  app.get('/health', async () => ({ status: 'ok', store: store.kind }));
 
   registerExtractRoute(app, { ...deps, store, limits });
   registerImproveRoute(app, deps);
