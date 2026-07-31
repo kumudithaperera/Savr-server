@@ -62,6 +62,37 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Schema.org `Recipe.image` is commonly a single URL, an `ImageObject`, or an
+ * array of either (multiple aspect ratios) - unlike other text fields, joining
+ * multiple entries would produce an invalid URL, so this takes the first one.
+ */
+function firstImageUrl(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = firstImageUrl(item);
+      if (url) return url;
+    }
+    return undefined;
+  }
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.url === 'string') return obj.url;
+  }
+  return undefined;
+}
+
+/** Resolves a possibly relative/protocol-relative image URL against the page URL. */
+function resolveImageUrl(raw: string | undefined, pageUrl: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return new URL(raw, pageUrl).toString();
+  } catch {
+    return raw;
+  }
+}
+
 /** Flattens schema.org instructions (strings or HowToStep/HowToSection). */
 function flattenInstructions(value: unknown): string[] {
   if (!value) return [];
@@ -110,15 +141,13 @@ function recipeNodeToText(recipe: Record<string, unknown>): string {
 }
 
 function extractMeta(html: string, property: string): string | undefined {
-  const patterns = [
-    new RegExp(`<meta[^>]+property=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
-    new RegExp(`<meta[^>]+name=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
-  ];
-  for (const re of patterns) {
-    const m = re.exec(html);
-    if (m) return m[1];
-  }
-  return undefined;
+  // Match the whole <meta> tag first, then pull content out separately, so
+  // this works regardless of whether `property`/`name` comes before or after
+  // `content` in the tag's attribute order.
+  const tagRegex = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]*>`, 'i');
+  const tag = tagRegex.exec(html)?.[0];
+  if (!tag) return undefined;
+  return /content=["']([^"']*)["']/i.exec(tag)?.[1];
 }
 
 /** Strips a page down to readable text as a last-resort fallback. */
@@ -155,9 +184,13 @@ export function createWebScraper(fetchImpl: typeof fetch = fetch): WebScraper {
       const recipe = extractJsonLdRecipe(html);
 
       if (recipe) {
+        const rawImage =
+          firstImageUrl(recipe.image) ??
+          extractMeta(html, 'og:image') ??
+          extractMeta(html, 'twitter:image');
         return {
           caption: recipeNodeToText(recipe),
-          imageUrl: asString(recipe.image) ?? extractMeta(html, 'og:image'),
+          imageUrl: resolveImageUrl(rawImage, url),
         };
       }
 
@@ -172,7 +205,8 @@ export function createWebScraper(fetchImpl: typeof fetch = fetch): WebScraper {
         throw unprocessable('Could not read any recipe content from this page.');
       }
 
-      return { caption, imageUrl: extractMeta(html, 'og:image') };
+      const rawImage = extractMeta(html, 'og:image') ?? extractMeta(html, 'twitter:image');
+      return { caption, imageUrl: resolveImageUrl(rawImage, url) };
     },
   };
 }
