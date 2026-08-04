@@ -52,8 +52,19 @@ export function normalizeRecipe(
   const steps = cleanList(parsed.steps);
   const title = parsed.title?.trim();
 
+  // The parser's own verdict comes first, so the message can say what was
+  // actually there instead of implying the link was broken. Checked before the
+  // empty-list test because a non-recipe may still carry a plausible title.
+  if (parsed.isRecipe === false) {
+    throw unprocessable(
+      'There is text here, but no recipe in it - no ingredients or steps are written out. ' +
+        "If the recipe is in the video or in the comments, Morsel can't read it yet.",
+      'not_a_recipe',
+    );
+  }
+
   if (!title || (ingredients.length === 0 && steps.length === 0)) {
-    throw unprocessable('This link does not appear to contain a recipe.');
+    throw unprocessable('This link does not appear to contain a recipe.', 'not_a_recipe');
   }
 
   return {

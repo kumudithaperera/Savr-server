@@ -1,4 +1,4 @@
-import { badRequest } from './errors.js';
+import { badRequest, unsupportedLink } from './errors.js';
 import type { SourcePlatform } from './types.js';
 
 const INSTAGRAM_HOSTS = ['instagram.com', 'www.instagram.com', 'instagr.am'];
@@ -36,6 +36,75 @@ export function detectPlatform(url: string): SourcePlatform {
   if (INSTAGRAM_HOSTS.includes(host)) return 'instagram';
   if (TIKTOK_HOSTS.includes(host)) return 'tiktok';
   return 'web';
+}
+
+const YOUTUBE_HOSTS = [
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'youtu.be',
+  'www.youtu.be',
+];
+
+/**
+ * Rejects links we can recognise as unextractable *before* spending anything,
+ * naming the actual problem instead of letting them fail confusingly downstream.
+ *
+ * Two real misroutes this closes:
+ *  - An Instagram **profile** URL still has an Instagram host, so it reached the
+ *    Apify scraper, which happily returned that account's most recent post - the
+ *    user got a random recipe they never asked for.
+ *  - A **YouTube** link matches no social host, so it fell through to the generic
+ *    web scraper, which finds no JSON-LD and hands Gemini the page's JS shell.
+ *    That produced garbage *and* skipped the quota, since only Instagram and
+ *    TikTok are metered.
+ *
+ * Call this straight after `assertHttpUrl` and before the cache lookup, so a
+ * rejected link costs no scrape, no Gemini call and no quota.
+ */
+export function assertExtractableUrl(url: string, platform: SourcePlatform): void {
+  const parsed = new URL(url);
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+
+  if (platform === 'instagram' && !INSTAGRAM_SHORTCODE.test(parsed.pathname)) {
+    throw unsupportedLink(
+      'That looks like an Instagram profile or story rather than a single post. ' +
+        'Open the post or Reel you want and share that link instead.',
+    );
+  }
+
+  if (platform === 'tiktok' && !isTikTokPostUrl(parsed)) {
+    throw unsupportedLink(
+      'That looks like a TikTok profile rather than a single video. ' +
+        'Open the video you want and share that link instead.',
+    );
+  }
+
+  if (platform === 'web' && YOUTUBE_HOSTS.includes(parsed.hostname.toLowerCase())) {
+    throw unsupportedLink(
+      "Morsel can't read YouTube recipes yet. If the creator has a blog post or " +
+        'an Instagram or TikTok version, paste that link instead.',
+    );
+  }
+
+  // Guard the two obvious "you pasted the site, not the recipe" cases: a bare
+  // host with no path can never be a specific recipe.
+  if (platform === 'web' && (parsed.pathname === '/' || parsed.pathname === '')) {
+    throw unsupportedLink(
+      `That's the front page of ${host}, not a recipe. Open the recipe itself and paste its link.`,
+    );
+  }
+}
+
+/** Whether a TikTok URL points at one video (either a full link or a short link). */
+function isTikTokPostUrl(parsed: URL): boolean {
+  if (TIKTOK_VIDEO_ID.test(parsed.pathname)) return true;
+  // Short links (vm.tiktok.com/abc123) only resolve to a video id once fetched,
+  // so anything with a path is given the benefit of the doubt.
+  if (TIKTOK_SHORT_HOSTS.includes(parsed.hostname.toLowerCase())) {
+    return parsed.pathname.replace(/\/+$/, '').length > 0;
+  }
+  return false;
 }
 
 /**

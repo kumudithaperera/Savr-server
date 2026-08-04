@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { assertHttpUrl, cacheKeyFromShortcode, canonicalCacheKey, detectPlatform } from './url.js';
+import {
+  assertExtractableUrl,
+  assertHttpUrl,
+  cacheKeyFromShortcode,
+  canonicalCacheKey,
+  detectPlatform,
+} from './url.js';
 import { HttpError } from './errors.js';
 
 describe('assertHttpUrl', () => {
@@ -112,5 +118,62 @@ describe('cacheKeyFromShortcode', () => {
   it('returns null when there is no usable id', () => {
     expect(cacheKeyFromShortcode('web', 'anything')).toBeNull();
     expect(cacheKeyFromShortcode('instagram', undefined)).toBeNull();
+  });
+});
+
+describe('assertExtractableUrl', () => {
+  /** Runs the same pairing the route does: detect the platform, then validate. */
+  const check = (url: string) => assertExtractableUrl(url, detectPlatform(url));
+
+  it('accepts the link shapes we can actually extract', () => {
+    expect(() => check('https://www.instagram.com/reel/ABC123/')).not.toThrow();
+    expect(() => check('https://www.instagram.com/p/ABC123/')).not.toThrow();
+    expect(() => check('https://www.instagram.com/share/reel/ABC123/')).not.toThrow();
+    expect(() => check('https://www.tiktok.com/@chef/video/7412345678901234567')).not.toThrow();
+    expect(() => check('https://vm.tiktok.com/ZMabc123/')).not.toThrow();
+    expect(() => check('https://example.com/recipes/pancakes')).not.toThrow();
+  });
+
+  it('rejects an Instagram profile rather than scraping its latest post', () => {
+    // The old behaviour: Apify was handed the profile URL and returned whatever
+    // that account posted most recently, so the user got a random recipe.
+    expect(() => check('https://www.instagram.com/cookingwithme/')).toThrow(HttpError);
+    try {
+      check('https://www.instagram.com/cookingwithme/');
+    } catch (err) {
+      expect((err as HttpError).code).toBe('unsupported_link');
+      expect((err as HttpError).message).toContain('profile');
+    }
+  });
+
+  it('rejects Instagram stories and highlights', () => {
+    expect(() => check('https://www.instagram.com/stories/chef/123456/')).toThrow(HttpError);
+    expect(() => check('https://www.instagram.com/explore/tags/dal/')).toThrow(HttpError);
+  });
+
+  it('rejects a TikTok profile', () => {
+    expect(() => check('https://www.tiktok.com/@chef')).toThrow(HttpError);
+  });
+
+  it('rejects YouTube links instead of feeding the page shell to the parser', () => {
+    for (const url of [
+      'https://www.youtube.com/watch?v=abc123',
+      'https://youtu.be/abc123',
+      'https://m.youtube.com/shorts/abc123',
+    ]) {
+      try {
+        check(url);
+        throw new Error(`expected ${url} to be rejected`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(HttpError);
+        expect((err as HttpError).code).toBe('unsupported_link');
+        expect((err as HttpError).message).toContain('YouTube');
+      }
+    }
+  });
+
+  it('rejects a bare site front page', () => {
+    expect(() => check('https://example.com/')).toThrow(HttpError);
+    expect(() => check('https://example.com')).toThrow(HttpError);
   });
 });

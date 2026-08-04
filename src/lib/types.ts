@@ -49,6 +49,14 @@ export interface ScrapedPost {
 
 /** Structured result returned by the LLM parsing step. */
 export interface ParsedRecipe {
+  /**
+   * Whether the source text actually contained a recipe. The parser is told to
+   * set this false and return empty fields rather than improvise, so a caption
+   * that merely *names* a dish can't become an invented recipe that then gets
+   * cached for a year and served to everyone. Optional so a response from an
+   * older parser still normalizes.
+   */
+  isRecipe?: boolean;
   title: string;
   servings?: number;
   ingredients: string[];

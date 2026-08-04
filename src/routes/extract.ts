@@ -11,6 +11,7 @@ import { normalizeRecipe } from '../lib/normalize.js';
 import type { Store } from '../lib/store.js';
 import type { ExtractedRecipe } from '../lib/types.js';
 import {
+  assertExtractableUrl,
   assertHttpUrl,
   cacheKeyFromShortcode,
   canonicalCacheKey,
@@ -56,11 +57,27 @@ function isMetered(platform: ReturnType<typeof detectPlatform>): boolean {
 }
 
 /**
+ * Extraction-output version, mixed into every cache key.
+ *
+ * Entries live for a year (`extractCacheTtlDays`), so without this a change to
+ * the Gemini prompt or to normalization would be invisible for every post that
+ * had already been extracted - the old output keeps being served until the TTL
+ * runs out. **Bump this whenever the prompt or normalization changes.** Old
+ * entries are simply orphaned and expire on their own.
+ *
+ * v2: prompt now preserves the source language and original ingredient names,
+ * and refuses to invent a recipe (`isRecipe`), so v1 entries include both
+ * silently-translated recipes and hallucinated ones.
+ */
+const EXTRACT_VERSION = 'v2';
+
+/**
  * Cache key for a canonical post identity (see `canonicalCacheKey`). Hashed to
  * keep keys short and opaque.
  */
 function cacheKey(canonical: string): string {
-  return `cache:extract:${createHash('sha256').update(canonical).digest('hex')}`;
+  const versioned = `${EXTRACT_VERSION}:${canonical}`;
+  return `cache:extract:${createHash('sha256').update(versioned).digest('hex')}`;
 }
 
 /** Monthly cache hit/miss counters, so the cache's payoff is measurable. */
@@ -106,6 +123,10 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
   app.post<{ Body: { url?: unknown } }>('/extract', async (request) => {
     const url = assertHttpUrl(request.body?.url);
     const platform = detectPlatform(url);
+    // Reject links we can already tell won't work (a profile instead of a post,
+    // a YouTube link) before the cache lookup and before any metering, so the
+    // user gets a message naming the real problem and pays nothing for it.
+    assertExtractableUrl(url, platform);
     const now = new Date();
 
     // Key on the post's identity, not the link's text: the same reel shared
@@ -152,6 +173,12 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     const parsed = await deps.parser.parse(scraped.caption);
     const recipe = normalizeRecipe(url, platform, scraped, parsed);
 
+    // INVARIANT: only a confidently-parsed recipe is ever cached. Every rejection
+    // upstream of here throws - the link check, the caption gate in the scraper,
+    // and `isRecipe: false` in normalization - so an uncertain result can't reach
+    // this line. That matters because an entry written here is keyed on the post,
+    // lives for a year, and is then served to everyone who pastes that link: one
+    // cached guess becomes the permanent answer for that post.
     await store.setJson(cacheKey(canonical), recipe, cacheTtlSeconds);
 
     // A short link (vm.tiktok.com/…) can't be canonicalised before scraping,

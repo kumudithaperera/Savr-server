@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from './app.js';
+import { unprocessable } from './lib/errors.js';
 import type { ScrapedPost } from './lib/types.js';
 
 /**
@@ -281,6 +282,91 @@ describe('global daily circuit breaker', () => {
 
     await extract(app, TIKTOK(1));
     expect((await extract(app, 'https://example.com/soup')).statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+// --- nothing uncertain is ever cached -------------------------------------
+
+describe('unextractable links', () => {
+  it('rejects an Instagram profile without calling the scraper at all', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await extract(app, 'https://www.instagram.com/cookingwithme/');
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().code).toBe('unsupported_link');
+    // The whole point: no Apify spend, no Gemini spend, on a link we could tell
+    // was wrong from its shape.
+    expect(deps.instagramScraper.scrape).not.toHaveBeenCalled();
+    expect(deps.parser.parse).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('does not spend the caller quota on an unsupported link', async () => {
+    const deps = makeDeps();
+    const app = buildApp({ ...deps, limits: { ...LIMITS, monthlyDeviceExtractionLimit: 1 } });
+
+    await extract(app, 'https://www.youtube.com/watch?v=abc123');
+    // If the rejected YouTube link had burned the single allowance, this would 429.
+    const after = await extract(app, TIKTOK(1));
+
+    expect(after.statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+describe('caching invariant: only a confident parse is stored', () => {
+  it('does not cache a link whose caption held no recipe', async () => {
+    // The parser reports "this is not a recipe" rather than improvising.
+    const parser = { parse: vi.fn(async () => ({ ...parsed, isRecipe: false })) };
+    const deps = makeDeps({ parser });
+    const app = buildApp(deps);
+
+    const first = await extract(app, TIKTOK(9));
+    const second = await extract(app, TIKTOK(9));
+
+    expect(first.statusCode).toBe(422);
+    expect(first.json().code).toBe('not_a_recipe');
+    // Second attempt must fail the same way. If the rejection had been cached -
+    // or worse, an invented recipe had been - this would return 200 and serve
+    // that guess to everyone who pastes the link for the next year.
+    expect(second.statusCode).toBe(422);
+    expect(parser.parse).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  it('does not cache a scrape that failed its caption gate', async () => {
+    const scraper = {
+      scrape: vi.fn(async () => {
+        throw unprocessable('caption has no recipe in it', 'caption_only');
+      }),
+    };
+    const deps = makeDeps({ instagramScraper: scraper as unknown as AppDeps['instagramScraper'] });
+    const app = buildApp(deps);
+
+    const IG_REEL = 'https://www.instagram.com/reel/ABC123/';
+    const first = await extract(app, IG_REEL);
+    const second = await extract(app, IG_REEL);
+
+    expect(first.statusCode).toBe(422);
+    expect(first.json().code).toBe('caption_only');
+    expect(second.statusCode).toBe(422);
+    expect(scraper.scrape).toHaveBeenCalledTimes(2);
+    expect(deps.parser.parse).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('still caches a genuine recipe', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+
+    await extract(app, TIKTOK(10));
+    const second = await extract(app, TIKTOK(10));
+
+    expect(second.statusCode).toBe(200);
+    expect(deps.parser.parse).toHaveBeenCalledOnce();
     await app.close();
   });
 });

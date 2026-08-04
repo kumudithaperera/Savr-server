@@ -10,6 +10,7 @@ export interface RecipeParser {
 const RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
+    isRecipe: { type: 'boolean' },
     title: { type: 'string' },
     servings: { type: 'integer' },
     ingredients: { type: 'array', items: { type: 'string' } },
@@ -28,6 +29,7 @@ const RESPONSE_SCHEMA = {
     suggestedCategory: { type: 'string', enum: [...CATEGORIES] },
   },
   required: [
+    'isRecipe',
     'title',
     'ingredients',
     'steps',
@@ -42,15 +44,23 @@ const SYSTEM_PROMPT = `You extract a single cooking recipe from the provided tex
 Return JSON only, matching the provided schema.
 
 Rules:
+- isRecipe: true only when the text actually contains a recipe - ingredients, steps, or both - written out.
+  - If it does not, set isRecipe=false and leave title empty and ingredients/steps as empty arrays.
+  - NEVER invent a recipe. Do not infer ingredients or steps from a hashtag, a handle, a dish name, or a title alone. A caption like "the best #paneerbuttermasala 😍 recipe below 👇" is NOT a recipe: it names a dish but writes none of it down.
 - title: a short, human-friendly recipe name.
 - ingredients: one item per array entry, including quantity when stated.
+  - One entry per ingredient the source lists. Do not merge several ingredients onto one line, and do not split one across lines.
 - steps: ordered preparation steps, one per array entry.
 - servings: integer number of servings the macros refer to. If unknown, assume 1.
 - macros: per-serving calories (kcal), carbs (g), protein (g), fat (g).
   - If the caption explicitly states nutrition/macros, use those values and set macrosStatedInCaption=true.
   - Otherwise estimate them from the ingredients and servings, and set macrosStatedInCaption=false.
 - suggestedCategory: one of meals, drinks, snacks, desserts — pick the best fit.
-- If the caption is not a recipe, still return your best-effort structure with empty ingredients/steps.`;
+
+Language and wording - preserve the source, do not normalize it:
+- Write title, ingredients and steps in the SAME language as the source text. Never translate.
+- Name each ingredient exactly as the source names it. "haldi" stays "haldi", "atta" stays "atta", "besan" stays "besan" - never substitute a Western equivalent like "turmeric" or "whole wheat flour".
+- Keep quantities and units exactly as written, including local measures (katori, tola, mutthi, inch) and non-numeric amounts ("to taste", "as required", "a pinch").`;
 
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
