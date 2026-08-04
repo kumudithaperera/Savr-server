@@ -3,7 +3,9 @@ import { loadConfig } from './config.js';
 import { createStore } from './lib/store.js';
 import { createApifyInstagramScraper } from './services/apify.js';
 import { createGeminiRecipeParser } from './services/gemini.js';
+import { createPexelsPhotoSearch } from './services/images.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
+import { createUsdaNutritionLookup } from './services/nutrition.js';
 import { createApifyTikTokScraper } from './services/tiktok.js';
 import { createWebScraper } from './services/web.js';
 
@@ -15,6 +17,8 @@ const app = buildApp({
   webScraper: createWebScraper(),
   parser: createGeminiRecipeParser(config),
   improver: createGeminiRecipeImprover(config),
+  photoSearch: createPexelsPhotoSearch(config),
+  nutrition: createUsdaNutritionLookup(config),
   appSharedSecret: config.appSharedSecret,
   store: createStore({ upstashUrl: config.upstashUrl, upstashToken: config.upstashToken }),
   limits: {
@@ -24,6 +28,14 @@ const app = buildApp({
   },
   rateLimit: { max: config.ipRateLimitMax, windowMs: config.ipRateLimitWindowMs },
 });
+
+if (!config.appSharedSecret) {
+  app.log.warn(
+    'APP_SHARED_SECRET is unset - /extract, /improve, /image-search and /nutrition accept ' +
+      'any caller. Fine locally; in a deployed environment set it and match it with the ' +
+      "app's EXPO_PUBLIC_APP_KEY.",
+  );
+}
 
 if (!config.upstashUrl) {
   app.log.warn(

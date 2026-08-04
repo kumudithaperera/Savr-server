@@ -2,14 +2,18 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { InstagramScraper } from './services/apify.js';
 import type { RecipeParser } from './services/gemini.js';
+import type { PhotoSearch } from './services/images.js';
 import type { RecipeImprover } from './services/improve.js';
+import type { NutritionLookup } from './services/nutrition.js';
 import type { TikTokScraper } from './services/tiktok.js';
 import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
 import { registerExtractRoute, statsKey, type ExtractLimits } from './routes/extract.js';
+import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
+import { registerNutritionRoute } from './routes/nutrition.js';
 
 /** Limits with the same defaults as `config.ts`, so tests need not supply them. */
 const DEFAULT_LIMITS: ExtractLimits = {
@@ -24,6 +28,10 @@ export interface AppDeps {
   webScraper: WebScraper;
   parser: RecipeParser;
   improver: RecipeImprover;
+  /** Backs `/image-search`, holding the Pexels key the app used to ship. */
+  photoSearch: PhotoSearch;
+  /** Backs `/nutrition`, holding the USDA key the app used to ship. */
+  nutrition: NutritionLookup;
   /** Shared secret guarding the expensive routes; empty disables the check (dev). */
   appSharedSecret: string;
   /**
@@ -83,6 +91,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   registerExtractRoute(app, { ...deps, store, limits });
   registerImproveRoute(app, deps);
+  registerImageSearchRoute(app, deps);
+  registerNutritionRoute(app, deps);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {

@@ -1,10 +1,13 @@
+import { timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import type { Store } from './store.js';
 
 /**
- * Lightweight, dependency-free protection for the expensive routes (`/extract`,
- * `/improve`) so random callers can't run up our Apify/Gemini spend:
+ * Lightweight, dependency-free protection for the routes that spend something on
+ * our behalf - `/extract` and `/improve` (Apify/Gemini), plus `/image-search`
+ * and `/nutrition`, which hold the Pexels and USDA keys the app used to ship in
+ * its bundle:
  *
  *  1. Shared-secret header — the app sends `x-morsel-app-key`; requests without
  *     the matching value are rejected 401. (Baked into the app bundle, so not a
@@ -20,8 +23,21 @@ import type { Store } from './store.js';
  * from an unlimited web one, so they live in the extract route instead.
  */
 
-const PROTECTED_PATHS = new Set(['/extract', '/improve']);
+const PROTECTED_PATHS = new Set(['/extract', '/improve', '/image-search', '/nutrition']);
 const APP_KEY_HEADER = 'x-morsel-app-key';
+
+/**
+ * Constant-time secret comparison. `!==` leaks the length of the matching prefix
+ * through response timing, which is enough to recover a secret byte by byte given
+ * enough samples. Length is compared first (and unavoidably leaks) because
+ * `timingSafeEqual` throws on mismatched buffer lengths.
+ */
+function secretMatches(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export interface RateLimitOptions {
   /** Max requests allowed per IP within the window. */
@@ -56,7 +72,7 @@ export function createRequestGuard(
 
     if (appSharedSecret) {
       const provided = request.headers[APP_KEY_HEADER];
-      if (provided !== appSharedSecret) {
+      if (!secretMatches(provided, appSharedSecret)) {
         await reply.status(401).send({ code: 'unauthorized', message: 'Invalid or missing app key.' });
         return;
       }

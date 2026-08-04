@@ -24,6 +24,13 @@ const parsed = {
   suggestedCategory: 'meals' as const,
 };
 
+const macros = {
+  caloriesPer100g: 52,
+  proteinPer100g: 0.3,
+  carbsPer100g: 14,
+  fatPer100g: 0.2,
+};
+
 function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     instagramScraper: stubScraper('ig'),
@@ -31,6 +38,8 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     webScraper: stubScraper('web'),
     parser: { parse: vi.fn(async () => parsed) },
     improver: {} as AppDeps['improver'],
+    photoSearch: { search: vi.fn(async () => 'https://images.example/photo.jpg') },
+    nutrition: { search: vi.fn(async () => macros) },
     appSharedSecret: '',
     ...overrides,
   };
@@ -367,6 +376,117 @@ describe('caching invariant: only a confident parse is stored', () => {
 
     expect(second.statusCode).toBe(200);
     expect(deps.parser.parse).toHaveBeenCalledOnce();
+    await app.close();
+  });
+});
+
+/**
+ * These two routes exist so the Pexels and USDA keys stay on the server instead
+ * of being inlined into the app bundle, where anyone could pull them out of the
+ * APK. The tests that matter are therefore about the trust boundary: the routes
+ * must be behind the same guardrail as the expensive ones, and must never echo
+ * anything but the value the app needs.
+ */
+describe('POST /image-search', () => {
+  it('returns the photo url for a query', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/image-search',
+      payload: { query: 'pancakes' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ url: 'https://images.example/photo.jpg' });
+    expect(deps.photoSearch.search).toHaveBeenCalledWith('pancakes');
+    await app.close();
+  });
+
+  it('rejects a missing query', async () => {
+    const app = buildApp(makeDeps());
+    const res = await app.inject({ method: 'POST', url: '/image-search', payload: {} });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('is behind the app-key guardrail', async () => {
+    const deps = makeDeps({ appSharedSecret: 'sekret' });
+    const app = buildApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/image-search',
+      payload: { query: 'pancakes' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(deps.photoSearch.search).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+describe('POST /nutrition', () => {
+  it('returns macros for a query', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/nutrition',
+      payload: { query: 'apple' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ macros });
+    await app.close();
+  });
+
+  it('returns null macros when nothing matched', async () => {
+    const app = buildApp(makeDeps({ nutrition: { search: vi.fn(async () => null) } }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/nutrition',
+      payload: { query: 'nonsense' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ macros: null });
+    await app.close();
+  });
+
+  it('is behind the app-key guardrail', async () => {
+    const deps = makeDeps({ appSharedSecret: 'sekret' });
+    const app = buildApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/nutrition',
+      payload: { query: 'apple' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(deps.nutrition.search).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+describe('guardrail secret comparison', () => {
+  it('rejects a key of the wrong length without throwing', async () => {
+    const app = buildApp(makeDeps({ appSharedSecret: 'sekret' }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/nutrition',
+      headers: { 'x-morsel-app-key': 'much-longer-than-the-real-one' },
+      payload: { query: 'apple' },
+    });
+    // `timingSafeEqual` throws on mismatched lengths, so this would 500 if the
+    // length check weren't done first.
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects a same-length near-miss', async () => {
+    const app = buildApp(makeDeps({ appSharedSecret: 'sekret' }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/nutrition',
+      headers: { 'x-morsel-app-key': 'sekrfr' },
+      payload: { query: 'apple' },
+    });
+    expect(res.statusCode).toBe(401);
     await app.close();
   });
 });

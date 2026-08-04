@@ -24,6 +24,20 @@ export interface Config {
   apifyTiktokNativeSubtitlesOnly: boolean;
   geminiApiKey: string;
   geminiModel: string;
+  /**
+   * Pexels key for recipe photo backfill (`/image-search`). Optional: empty just
+   * disables backfill, and recipes save without a photo. Lives here rather than
+   * in the app because `EXPO_PUBLIC_*` vars are inlined into the JS bundle and
+   * extractable from the APK.
+   */
+  pexelsApiKey: string;
+  /**
+   * USDA FoodData Central key for the nutrition cross-check (`/nutrition`).
+   * Optional: empty falls back to USDA's shared `DEMO_KEY`, which is rate-limited
+   * across every caller using it, so set a real one in production. Server-side
+   * for the same reason as `pexelsApiKey`.
+   */
+  usdaApiKey: string;
   port: number;
   /**
    * Shared secret the app sends as `x-morsel-app-key`. When set, the backend
@@ -90,6 +104,8 @@ export function loadConfig(): Config {
     apifyTiktokNativeSubtitlesOnly: process.env.APIFY_TIKTOK_NATIVE_SUBTITLES_ONLY !== 'false',
     geminiApiKey: required('GEMINI_API_KEY'),
     geminiModel: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+    pexelsApiKey: process.env.PEXELS_API_KEY ?? '',
+    usdaApiKey: process.env.USDA_API_KEY ?? '',
     port: Number(process.env.PORT ?? 3000),
     appSharedSecret: process.env.APP_SHARED_SECRET ?? '',
     upstashUrl: process.env.UPSTASH_REDIS_REST_URL ?? '',

@@ -14,7 +14,8 @@ The mobile app calls this so API keys never live on the device.
 
 ```bash
 cd server
-cp .env.example .env   # fill APIFY_TOKEN and GEMINI_API_KEY
+cp .env.example .env   # fill APIFY_TOKEN and GEMINI_API_KEY; set APP_SHARED_SECRET
+                       # in any deployed environment, plus PEXELS_API_KEY / USDA_API_KEY
 npm install
 npm run dev            # starts on PORT (default 3000)
 ```
@@ -48,14 +49,37 @@ Response `200`:
 
 Errors: `400` invalid/non-http URL · `422` link has no recipe content · `502` Apify/Gemini/page-fetch upstream failure.
 
+### `POST /image-search`
+
+Body `{ "query": "pancakes" }` → `{ "url": "https://…" | null }`. Searches Pexels for a
+recipe photo. Returns `null` (not an error) when nothing matches or `PEXELS_API_KEY` is
+unset, since the app treats a missing photo as a no-op.
+
+### `POST /nutrition`
+
+Body `{ "query": "plain flour" }` → `{ "macros": { … } | null }`. Best-matching USDA
+FoodData Central food's per-100 g macros, or `null` when nothing usable matched. Falls back
+to USDA's shared `DEMO_KEY` when `USDA_API_KEY` is unset - that key is rate-limited across
+every caller using it worldwide, so set a real one.
+
+Both routes exist so the Pexels and USDA keys stay here. They used to live in the app as
+`EXPO_PUBLIC_*` vars, which Expo inlines into the JS bundle at build time - extractable from
+the shipped APK by anyone who unzips it. Both are guarded like `/extract`.
+
 ### `GET /health`
 
 Returns `{ "status": "ok" }`. Unguarded.
 
 ## Abuse & cost controls
 
-Morsel has no user accounts, so `/extract` and `/improve` are protected by four
-layers instead. All of them are configured through env vars (see `.env.example`).
+Morsel has no user accounts, so the protected routes - `/extract`, `/improve`,
+`/image-search` and `/nutrition` - are covered by four layers instead. All of them
+are configured through env vars (see `.env.example`).
+
+> **`APP_SHARED_SECRET` must actually be set.** The shared-secret layer is skipped
+> entirely when it is empty, and the app only sends the header when its own
+> `EXPO_PUBLIC_APP_KEY` is non-empty. If either side is unset the routes are open to
+> anyone; a production build shipped in exactly that state once, so check both.
 
 | Layer | Scope | Response when tripped |
 | --- | --- | --- |
