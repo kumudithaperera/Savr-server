@@ -1,16 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 
 import { normalizeRedeemCode } from '../config.js';
+import { resolveEntitlement } from '../lib/entitlement.js';
 import { badRequest, codeAlreadyUsed, invalidCode, rateLimited } from '../lib/errors.js';
 import {
   codeClaimKey,
   deviceIdOf,
   grantKey,
-  readActiveGrant,
   type CodeClaim,
   type PlusGrant,
 } from '../lib/grants.js';
 import type { Store } from '../lib/store.js';
+import type { Supabase } from '../lib/supabase.js';
 
 /**
  * Registers `POST /redeem` and `GET /entitlement` - the free-grant path for
@@ -40,10 +41,12 @@ export interface RedeemOptions {
 interface RedeemDeps {
   store: Store;
   redeem: RedeemOptions;
+  /** Subscription lookup for `/entitlement`; unconfigured = codes only. */
+  supabase: Supabase;
 }
 
 export function registerRedeemRoute(app: FastifyInstance, deps: RedeemDeps): void {
-  const { store, redeem } = deps;
+  const { store, redeem, supabase } = deps;
   const issued = new Set(redeem.plusRedeemCodes);
 
   /**
@@ -121,13 +124,16 @@ export function registerRedeemRoute(app: FastifyInstance, deps: RedeemDeps): voi
   // Re-checked by the app on every launch, so removing a code from the env and
   // deleting its grant key actually takes Plus away. The app keeps its stored
   // grant when this call fails, so an offline launch doesn't revoke anything.
+  //
+  // Answers for *both* ways of holding Plus - a redeemed code and a paid
+  // subscription - by going through the same resolver the extraction cap uses,
+  // so the app is never told something the server won't then enforce.
   app.get('/entitlement', async (request) => {
-    const deviceId = deviceIdOf(request);
-    const grant = await readActiveGrant(store, deviceId, Date.now());
+    const entitlement = await resolveEntitlement({ store, supabase }, request);
     return {
-      plus: Boolean(grant),
-      expiresAt: grant?.expiresAt ?? null,
-      source: grant ? 'code' : null,
+      plus: entitlement.plus,
+      expiresAt: entitlement.expiresAt,
+      source: entitlement.source,
     };
   });
 }

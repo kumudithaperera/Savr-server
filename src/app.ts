@@ -10,11 +10,13 @@ import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
+import { createSupabase, type Supabase } from './lib/supabase.js';
 import { registerExtractRoute, statsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
 import { registerNutritionRoute } from './routes/nutrition.js';
 import { registerRedeemRoute, type RedeemOptions } from './routes/redeem.js';
+import { registerRevenueCatWebhook } from './routes/webhooks.js';
 
 /** Limits with the same defaults as `config.ts`, so tests need not supply them. */
 const DEFAULT_LIMITS: ExtractLimits = {
@@ -48,6 +50,16 @@ export interface AppDeps {
   /** Issued Plus codes + grant lifetime. Omitted = redemption disabled. */
   redeem?: RedeemOptions;
   rateLimit?: RateLimitOptions;
+  /**
+   * Subscription state. Omitted in tests and in local dev without a Supabase
+   * project: entitlements then come from redeem codes alone, which is exactly
+   * how the server behaved before subscriptions existed.
+   */
+  supabase?: Supabase;
+  /** Secret RevenueCat sends in `Authorization`. Empty = the webhook rejects all. */
+  revenueCatWebhookSecret?: string;
+  /** Entitlement id meaning Plus, as spelled in the RevenueCat dashboard. */
+  revenueCatEntitlementId?: string;
 }
 
 /**
@@ -61,6 +73,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   const store = deps.store ?? createStore({ upstashUrl: '', upstashToken: '' });
   const limits = deps.limits ?? DEFAULT_LIMITS;
+  // Unconfigured by default: every method no-ops, so an app built without a
+  // Supabase project behaves exactly as it did before subscriptions existed.
+  const supabase =
+    deps.supabase ??
+    createSupabase({ url: '', anonKey: '', serviceRoleKey: '' }, store);
 
   // Shared-secret + per-IP rate limit on the expensive routes (see guardrail.ts).
   app.addHook(
@@ -96,11 +113,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     };
   });
 
-  registerExtractRoute(app, { ...deps, store, limits });
+  registerExtractRoute(app, { ...deps, store, limits, supabase });
   registerImproveRoute(app, deps);
   registerImageSearchRoute(app, deps);
   registerNutritionRoute(app, deps);
-  registerRedeemRoute(app, { store, redeem: deps.redeem ?? DEFAULT_REDEEM });
+  registerRedeemRoute(app, { store, supabase, redeem: deps.redeem ?? DEFAULT_REDEEM });
+  registerRevenueCatWebhook(app, {
+    supabase,
+    webhookSecret: deps.revenueCatWebhookSecret ?? '',
+    entitlementId: deps.revenueCatEntitlementId ?? 'Morsel Plus',
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {

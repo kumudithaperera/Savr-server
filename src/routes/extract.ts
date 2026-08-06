@@ -6,10 +6,12 @@ import type { InstagramScraper } from '../services/apify.js';
 import type { RecipeParser } from '../services/gemini.js';
 import type { TikTokScraper } from '../services/tiktok.js';
 import type { WebScraper } from '../services/web.js';
+import { resolveEntitlement } from '../lib/entitlement.js';
 import { atCapacity, quotaExceeded } from '../lib/errors.js';
-import { deviceIdOf, readActiveGrant } from '../lib/grants.js';
+import { deviceIdOf } from '../lib/grants.js';
 import { normalizeRecipe } from '../lib/normalize.js';
 import type { Store } from '../lib/store.js';
+import type { Supabase } from '../lib/supabase.js';
 import type { ExtractedRecipe } from '../lib/types.js';
 import {
   assertExtractableUrl,
@@ -35,6 +37,8 @@ interface ExtractDeps {
   parser: RecipeParser;
   store: Store;
   limits: ExtractLimits;
+  /** Subscription lookup behind the cap; unconfigured = redeem codes only. */
+  supabase: Supabase;
 }
 
 /** Picks the scraper for a link's origin. */
@@ -106,7 +110,7 @@ const DAY_TTL_SECONDS = 48 * 60 * 60;
  * centrally.
  */
 export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): void {
-  const { store, limits } = deps;
+  const { store, limits, supabase } = deps;
   const cacheTtlSeconds = limits.extractCacheTtlDays * 24 * 60 * 60;
 
   app.post<{ Body: { url?: unknown } }>('/extract', async (request) => {
@@ -149,11 +153,20 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
       }
 
       // Then the caller's own monthly allowance. Read before the work so a user
-      // over the cap never triggers a paid scrape. The cap comes from the grant
-      // record this server wrote at redemption, never from anything the client
-      // claims about its plan - this is the one Plus benefit that costs money.
-      const grant = await readActiveGrant(store, deviceId, now.getTime());
-      const limit = grant ? limits.plusDeviceExtractionLimit : limits.monthlyDeviceExtractionLimit;
+      // over the cap never triggers a paid scrape. The cap comes from records
+      // this server wrote - the grant it stored at redemption, and the
+      // subscription the RevenueCat webhook wrote into Supabase - never from
+      // anything the client claims about its plan. This is the one Plus benefit
+      // that costs real money.
+      const entitlement = await resolveEntitlement({ store, supabase }, request, now.getTime());
+      const limit = entitlement.plus
+        ? limits.plusDeviceExtractionLimit
+        : limits.monthlyDeviceExtractionLimit;
+
+      // The counter stays keyed on the install, never on the signed-in user,
+      // even though the *limit* now depends on who is signed in. Switching the
+      // bucket on sign-in would hand someone a second free allowance for the
+      // cost of signing out.
       const used = await store.getJson<number>(`q:dev:${deviceId}:${monthKey(now)}`);
       if ((used ?? 0) >= limit) {
         throw quotaExceeded(

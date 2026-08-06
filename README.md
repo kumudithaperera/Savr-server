@@ -80,10 +80,16 @@ reinstall recovers the grant but can't extend a time-limited one.
 
 ### `GET /entitlement`
 
-→ `{ "plus": boolean, "expiresAt": number | null, "source": "code" | null }` for the calling
-install. The app calls this on every launch, which is what makes revoking a code take effect:
-a definitive `plus: false` clears the app's stored grant. A failed call leaves it alone, so
-being offline never costs someone their Plus.
+→ `{ "plus": boolean, "expiresAt": number | null, "source": "code" | "subscription" | null }`
+for the caller. The app calls this on every launch, which is what makes revoking a code take
+effect: a definitive `plus: false` clears the app's stored grant. A failed call leaves it
+alone, so being offline never costs someone their Plus.
+
+Answers for **both** ways of holding Plus - a redeemed code, keyed on the anonymous install
+id, and a paid subscription, keyed on a Supabase user. Send the caller's Supabase access token
+as `Authorization: Bearer <jwt>` for the second to be visible; without one this is a
+codes-only answer, which is what an anonymous caller gets. Resolved in `src/lib/entitlement.ts`,
+which is also what `/extract` uses to pick the cap, so the two can't disagree.
 
 #### Issuing and revoking codes
 
@@ -105,8 +111,33 @@ To revoke: remove the code from `PLUS_REDEEM_CODES` and delete that install's
 
 An active grant also raises the caller's monthly extraction cap from
 `MONTHLY_DEVICE_EXTRACTION_LIMIT` to `PLUS_DEVICE_EXTRACTION_LIMIT`. That is read from the
-grant record this server wrote - never from a client-supplied plan claim. Paid RevenueCat
-subscribers are **not** recognised yet and are still capped at the free limit.
+grant record this server wrote - never from a client-supplied plan claim.
+
+### `POST /webhooks/revenuecat`
+
+The only writer of paid entitlements. RevenueCat calls it on every purchase, renewal,
+cancellation and expiry; it records the event and upserts the subscriber's row in Supabase.
+
+Requires the shared secret RevenueCat sends in its `Authorization` header
+(`REVENUECAT_WEBHOOK_SECRET`). **An unset secret rejects every delivery** - the opposite of the
+`APP_SHARED_SECRET` guardrail's deliberate fail-open, because an unauthenticated endpoint that
+decides who has paid is a "grant me Plus" button. It is exempt from the app-key check (RevenueCat
+cannot send `x-morsel-app-key`) but still rate limited.
+
+Redeliveries are no-ops - the event id is the primary key of `revenuecat_events` - and a write
+only applies over a strictly older `event_timestamp_ms`, so out-of-order delivery cannot revoke a
+live subscription. A `CANCELLATION` does not revoke: it clears `will_renew` and access continues
+to the period end.
+
+Setup is in `supabase/001_subscriptions.sql` plus the checklist in
+`../security-reports/supabase-auth-entitlement-preflight.md`. Run the SQL and confirm both tables
+report **RLS enabled** before pointing anything at it - the anon key ships inside the app, and RLS
+is the only thing stopping a user writing `plan = 'plus'` onto their own row.
+
+To exercise the subscriber path without buying anything, `supabase/002_test_plus_account.sql`
+grants Plus to a hand-created test user - the same row this webhook would have written, so
+`/entitlement` and the extraction cap both see a genuine subscription. It needs
+`set local role service_role`, because the missing write policy applies to the table owner too.
 
 ### `GET /health`
 
@@ -193,11 +224,13 @@ Two consequences worth remembering:
 - At the free 30/month per-install cap, **$5 supports roughly 61 fully-active
   users a month**. That, not the code, is the current ceiling on how many people
   Morsel can serve.
-- **Plus (200/mo) is not enforceable yet.** The server applies one cap to
-  everyone because it cannot tell a subscriber from a free user. Before paid
-  tiers go live, check the caller's entitlement with `REVENUECAT_SECRET_API_KEY`
-  and choose the cap from that; a client-supplied plan claim is forgeable and
-  would hand anyone the higher limit.
+- **Plus (200/mo) is now enforceable.** The cap comes from `src/lib/entitlement.ts`,
+  which resolves a redeemed code from this server's own grant record and a paid
+  subscription from the Supabase row the RevenueCat webhook wrote. Neither is a
+  client-supplied plan claim, which would be forgeable and would hand anyone the
+  higher limit. It needs the Supabase env vars set to see subscriptions at all -
+  without them the server falls back to codes-only and a subscriber is metered at
+  the free cap, which is the pre-2026-08-06 behaviour.
 - **Cache hits are free.** Once several users save the same viral reel, the
   30-day cache is the single biggest lever on how far the $5 stretches.
 

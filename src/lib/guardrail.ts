@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
+import { REVENUECAT_WEBHOOK_PATH } from '../routes/webhooks.js';
 import type { Store } from './store.js';
 
 /**
@@ -34,6 +35,23 @@ const PROTECTED_PATHS = new Set([
   '/redeem',
   '/entitlement',
 ]);
+
+/**
+ * Paths that get the per-IP rate limit but **not** the app-key check, with the
+ * multiplier applied to the normal ceiling.
+ *
+ * The RevenueCat webhook is called by RevenueCat's servers, which have no way to
+ * send `x-morsel-app-key` - requiring it would simply break purchases. It is not
+ * unprotected: it carries its own mandatory shared secret, checked inside the
+ * route, and unlike this one that check fails *closed* (see `routes/webhooks.ts`).
+ *
+ * The rate limit still applies so the endpoint can't be flooded, but with a lot
+ * of headroom: every event arrives from a handful of RevenueCat IPs, so they
+ * share one bucket, and dropping a real purchase event to save a few requests
+ * would be a bad trade even though RevenueCat retries.
+ */
+const RATE_LIMITED_ONLY_PATHS = new Map<string, number>([[REVENUECAT_WEBHOOK_PATH, 10]]);
+
 const APP_KEY_HEADER = 'x-morsel-app-key';
 
 /**
@@ -69,18 +87,19 @@ export function createRequestGuard(
 ) {
   const windowSeconds = Math.ceil(rateLimit.windowMs / 1000);
 
-  async function rateLimited(ip: string, now: number): Promise<boolean> {
+  async function rateLimited(ip: string, now: number, multiplier: number): Promise<boolean> {
     // Bucket by window start so each window gets its own self-expiring key.
     const windowStart = Math.floor(now / rateLimit.windowMs);
     const count = await store.incrWithTtl(`rl:ip:${ip}:${windowStart}`, windowSeconds);
-    return count > rateLimit.max;
+    return count > rateLimit.max * multiplier;
   }
 
   return async function guard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const path = request.url.split('?')[0];
-    if (!PROTECTED_PATHS.has(path)) return;
+    const rateLimitOnly = RATE_LIMITED_ONLY_PATHS.get(path);
+    if (rateLimitOnly === undefined && !PROTECTED_PATHS.has(path)) return;
 
-    if (appSharedSecret) {
+    if (rateLimitOnly === undefined && appSharedSecret) {
       const provided = request.headers[APP_KEY_HEADER];
       if (!secretMatches(provided, appSharedSecret)) {
         await reply.status(401).send({ code: 'unauthorized', message: 'Invalid or missing app key.' });
@@ -88,7 +107,7 @@ export function createRequestGuard(
       }
     }
 
-    if (await rateLimited(request.ip, Date.now())) {
+    if (await rateLimited(request.ip, Date.now(), rateLimitOnly ?? 1)) {
       await reply
         .status(429)
         .send({ code: 'rate_limited', message: 'Too many requests. Please try again shortly.' });

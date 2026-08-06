@@ -58,12 +58,11 @@ export interface Config {
    * `FREE_AI_EXTRACTION_LIMIT` in the app (`Morsel/lib/pricing/data.ts`); only
    * Instagram/TikTok links count, web & blog imports are unlimited.
    *
-   * This is the **free** cap. An install holding a redeemed Plus code gets
-   * `plusDeviceExtractionLimit` instead, resolved from the grant record the
-   * server itself wrote - never from a client-supplied plan claim, which is
-   * forgeable. Paid RevenueCat subscribers are still capped here at the free
-   * limit; verifying those server-side with `REVENUECAT_SECRET_API_KEY` is the
-   * remaining piece before checkout is enabled.
+   * This is the **free** cap. An install gets `plusDeviceExtractionLimit`
+   * instead when it holds a redeemed Plus code *or* the signed-in caller has an
+   * active RevenueCat subscription - both resolved in `lib/entitlement.ts` from
+   * records this server wrote, never from a client-supplied plan claim, which is
+   * forgeable.
    */
   monthlyDeviceExtractionLimit: number;
   /**
@@ -107,6 +106,40 @@ export interface Config {
    * 404 - but the app falls back to a Pexels image when a download fails.
    */
   extractCacheTtlDays: number;
+  /**
+   * Supabase project URL. Empty disables account-based entitlements entirely:
+   * the server still serves everyone, still honours redeem codes, and simply
+   * never sees a subscription - which is the correct local-dev default.
+   */
+  supabaseUrl: string;
+  /**
+   * Public anon key. Safe to hold (the app ships it too) *only* because RLS is
+   * enabled on every table - see `supabase/001_subscriptions.sql`. Used to read
+   * an entitlement while presenting the caller's own JWT, so Postgres does the
+   * verifying and the scoping.
+   */
+  supabaseAnonKey: string;
+  /**
+   * Service role key. **Bypasses RLS.** Server-only: never prefix it
+   * `EXPO_PUBLIC_`, never put it in `eas.json`, never read it from app code -
+   * `EXPO_PUBLIC_*` vars are inlined into the JS bundle and extractable from the
+   * shipped AAB. Only the RevenueCat webhook path uses it.
+   */
+  supabaseServiceRoleKey: string;
+  /**
+   * Shared secret RevenueCat sends in the `Authorization` header of its webhook.
+   * Unlike `appSharedSecret`, an empty value here **rejects everything** rather
+   * than disabling the check: this endpoint decides who has paid, so failing
+   * open would make it a public "grant me Plus" button.
+   */
+  revenueCatWebhookSecret: string;
+  /**
+   * The entitlement identifier that means Plus, spelled exactly as it is in the
+   * RevenueCat dashboard. Mirrors `ENTITLEMENTS.plus` in the app
+   * (`Morsel/lib/purchases/config.ts`); a mismatch means webhooks arrive, get
+   * logged, and grant nobody anything.
+   */
+  revenueCatEntitlementId: string;
 }
 
 /** Reads a positive integer env var, falling back when unset or malformed. */
@@ -171,5 +204,10 @@ export function loadConfig(): Config {
     ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
     ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),
     extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 365),
+    supabaseUrl: process.env.SUPABASE_URL ?? '',
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? '',
+    supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
+    revenueCatWebhookSecret: process.env.REVENUECAT_WEBHOOK_SECRET ?? '',
+    revenueCatEntitlementId: process.env.REVENUECAT_ENTITLEMENT_ID ?? 'Morsel Plus',
   };
 }
