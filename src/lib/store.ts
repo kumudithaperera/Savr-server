@@ -29,8 +29,25 @@ export interface Store {
   incrWithTtl(key: string, ttlSeconds: number): Promise<number>;
   /** Reads and parses a JSON value, or null when missing/unreadable. */
   getJson<T>(key: string): Promise<T | null>;
-  /** Stores a JSON value with a TTL. Best-effort; failures are swallowed. */
-  setJson(key: string, value: unknown, ttlSeconds: number): Promise<void>;
+  /**
+   * Stores a JSON value, expiring after `ttlSeconds`. Omit the TTL for a value
+   * that must outlive every window (redeem-code claims). Best-effort; failures
+   * are swallowed.
+   */
+  setJson(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
+  /**
+   * Writes `value` only when `key` is absent, returning whether this caller won
+   * the write. Backed by `SET ... NX`, so it is atomic: two devices redeeming
+   * the same code in the same instant cannot both succeed, which a
+   * read-then-write cannot guarantee.
+   *
+   * Fails **open** like everything else here - an unreachable store returns
+   * `true` (treat the key as freshly claimed) rather than locking the caller
+   * out. For redeem codes that means an Upstash outage can let one code be
+   * claimed twice; the alternative is refusing every legitimate redemption
+   * during an outage. See `server/README.md`.
+   */
+  setJsonIfAbsent(key: string, value: unknown, ttlSeconds?: number): Promise<boolean>;
 }
 
 export interface StoreConfig {
@@ -99,8 +116,18 @@ function createMemoryStore(): Store {
     async setJson(key, value, ttlSeconds) {
       entries.set(key, {
         value: JSON.stringify(value),
-        expiresAt: Date.now() + ttlSeconds * 1000,
+        expiresAt: ttlSeconds == null ? Infinity : Date.now() + ttlSeconds * 1000,
       });
+    },
+    async setJsonIfAbsent(key, value, ttlSeconds) {
+      const now = Date.now();
+      sweep(now);
+      if (read(key, now) != null) return false;
+      entries.set(key, {
+        value: JSON.stringify(value),
+        expiresAt: ttlSeconds == null ? Infinity : now + ttlSeconds * 1000,
+      });
+      return true;
     },
   };
 }
@@ -169,9 +196,25 @@ function createUpstashStore(config: StoreConfig, warn: Warn): Store {
     },
     async setJson(key, value, ttlSeconds) {
       try {
-        await pipeline([['SET', key, JSON.stringify(value), 'EX', ttlSeconds]]);
+        const command: (string | number)[] = ['SET', key, JSON.stringify(value)];
+        if (ttlSeconds != null) command.push('EX', ttlSeconds);
+        await pipeline([command]);
       } catch (err) {
         warn(`[store] SET ${key} failed, continuing without caching: ${(err as Error).message}`);
+      }
+    },
+    async setJsonIfAbsent(key, value, ttlSeconds) {
+      try {
+        const command: (string | number)[] = ['SET', key, JSON.stringify(value), 'NX'];
+        if (ttlSeconds != null) command.push('EX', ttlSeconds);
+        const [set] = await pipeline([command]);
+        if (set?.error) throw new Error(set.error);
+        // NX returns the string "OK" on a write and a null result when the key
+        // already existed.
+        return set?.result != null;
+      } catch (err) {
+        warn(`[store] SET NX ${key} failed, treating the key as unclaimed: ${(err as Error).message}`);
+        return true;
       }
     },
   };

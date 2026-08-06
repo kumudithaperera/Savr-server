@@ -112,6 +112,7 @@ const TIKTOK = (n: number) => `https://www.tiktok.com/@x/video/${n}`;
 /** Production defaults, narrowed per test to keep cases short. */
 const LIMITS = {
   monthlyDeviceExtractionLimit: 50,
+  plusDeviceExtractionLimit: 500,
   globalDailyExtractionLimit: 200,
   extractCacheTtlDays: 30,
 };

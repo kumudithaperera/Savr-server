@@ -42,3 +42,18 @@ export const unsupportedLink = (message: string) =>
 export const quotaExceeded = (message: string) => new HttpError(429, 'quota_exceeded', message);
 /** The whole service hit its daily spend ceiling; nobody gets AI extractions today. */
 export const atCapacity = (message: string) => new HttpError(503, 'at_capacity', message);
+
+/**
+ * The redeem code isn't one we issued. Deliberately identical whether redemption
+ * is switched off entirely or the code is simply wrong - distinguishing the two
+ * would tell someone probing the endpoint when it's worth guessing.
+ */
+export const invalidCode = (message: string) => new HttpError(422, 'invalid_code', message);
+/** The code was already claimed by a different install. */
+export const codeAlreadyUsed = (message: string) =>
+  new HttpError(409, 'code_already_used', message);
+/**
+ * Too many wrong codes from this install/IP. Shares the `rate_limited` code with
+ * the per-IP guardrail so the app can treat both the same way.
+ */
+export const rateLimited = (message: string) => new HttpError(429, 'rate_limited', message);

@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 
 import type { InstagramScraper } from '../services/apify.js';
 import type { RecipeParser } from '../services/gemini.js';
 import type { TikTokScraper } from '../services/tiktok.js';
 import type { WebScraper } from '../services/web.js';
 import { atCapacity, quotaExceeded } from '../lib/errors.js';
+import { deviceIdOf, readActiveGrant } from '../lib/grants.js';
 import { normalizeRecipe } from '../lib/normalize.js';
 import type { Store } from '../lib/store.js';
 import type { ExtractedRecipe } from '../lib/types.js';
@@ -18,11 +19,11 @@ import {
   detectPlatform,
 } from '../lib/url.js';
 
-const DEVICE_ID_HEADER = 'x-morsel-device-id';
-
 /** Limits applied to metered (AI) extractions. Web & blog links skip all of them. */
 export interface ExtractLimits {
   monthlyDeviceExtractionLimit: number;
+  /** Applied instead of the above when the install holds a Plus grant. */
+  plusDeviceExtractionLimit: number;
   globalDailyExtractionLimit: number;
   extractCacheTtlDays: number;
 }
@@ -84,18 +85,6 @@ function cacheKey(canonical: string): string {
 const STATS_TTL_SECONDS = 60 * 24 * 60 * 60;
 export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
   `stats:${kind}:${monthKey(now)}`;
-
-/**
- * The calling install, as sent by the app (a hashed ANDROID_ID). Unauthenticated
- * and therefore forgeable — it meters honest users and survives a reinstall,
- * which is the realistic abuse case. Requests without one share a single bucket
- * so an omitted header is not a free pass.
- */
-function deviceIdOf(request: FastifyRequest): string {
-  const raw = request.headers[DEVICE_ID_HEADER];
-  const value = typeof raw === 'string' ? raw.trim() : '';
-  return value.slice(0, 128) || 'unknown';
-}
 
 /** Calendar-month key, matching the app's month-based reset. */
 function monthKey(now: Date): string {
@@ -160,11 +149,15 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
       }
 
       // Then the caller's own monthly allowance. Read before the work so a user
-      // over the cap never triggers a paid scrape.
+      // over the cap never triggers a paid scrape. The cap comes from the grant
+      // record this server wrote at redemption, never from anything the client
+      // claims about its plan - this is the one Plus benefit that costs money.
+      const grant = await readActiveGrant(store, deviceId, now.getTime());
+      const limit = grant ? limits.plusDeviceExtractionLimit : limits.monthlyDeviceExtractionLimit;
       const used = await store.getJson<number>(`q:dev:${deviceId}:${monthKey(now)}`);
-      if ((used ?? 0) >= limits.monthlyDeviceExtractionLimit) {
+      if ((used ?? 0) >= limit) {
         throw quotaExceeded(
-          `You've used all ${limits.monthlyDeviceExtractionLimit} AI extractions this month. Blog & website recipes are still unlimited.`,
+          `You've used all ${limit} AI extractions this month. Blog & website recipes are still unlimited.`,
         );
       }
     }

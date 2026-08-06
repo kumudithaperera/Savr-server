@@ -58,14 +58,35 @@ export interface Config {
    * `FREE_AI_EXTRACTION_LIMIT` in the app (`Morsel/lib/pricing/data.ts`); only
    * Instagram/TikTok links count, web & blog imports are unlimited.
    *
-   * This is the **free** cap and currently applies to everyone: the server has
-   * no notion of entitlements, so a Plus subscriber would be cut off here at 30
-   * despite the plan advertising 200. That is fine only while Plus stays hidden
-   * for the free-only launch. Before enabling paid tiers, verify the caller's
-   * entitlement server-side with `REVENUECAT_SECRET_API_KEY` and pick the cap
-   * from that - never from a client-supplied plan claim, which is forgeable.
+   * This is the **free** cap. An install holding a redeemed Plus code gets
+   * `plusDeviceExtractionLimit` instead, resolved from the grant record the
+   * server itself wrote - never from a client-supplied plan claim, which is
+   * forgeable. Paid RevenueCat subscribers are still capped here at the free
+   * limit; verifying those server-side with `REVENUECAT_SECRET_API_KEY` is the
+   * remaining piece before checkout is enabled.
    */
   monthlyDeviceExtractionLimit: number;
+  /**
+   * The same allowance for an install with an active Plus grant. Mirrors
+   * `PLUS_AI_EXTRACTION_LIMIT` in the app (`Morsel/lib/pricing/data.ts`).
+   */
+  plusDeviceExtractionLimit: number;
+  /**
+   * Codes that redeem Morsel Plus, comma-separated. There is no database here,
+   * so the issued list lives in the environment and redemption *state* lives in
+   * the store - adding or revoking a code is an env edit plus a redeploy.
+   *
+   * Empty disables redemption. Issue high-entropy codes only: the store fails
+   * open, so a short guessable code is a real risk even with the per-install
+   * attempt limiter in `routes/redeem.ts`.
+   */
+  plusRedeemCodes: string[];
+  /**
+   * How long a redeemed grant lasts, in days. 0 (the default) means it never
+   * expires. Applied at redemption time, so changing it does not affect grants
+   * that were already claimed.
+   */
+  plusGrantDays: number;
   /**
    * Service-wide AI extractions per day. On the free Apify/Gemini tiers this is
    * not a bill guard (neither can overspend) but an **availability** guard: it
@@ -96,6 +117,38 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** Same, but allows 0 (used by `PLUS_GRANT_DAYS`, where 0 means "never expires"). */
+function nonNegativeFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Reads a comma-separated list, normalized the same way the redeem route
+ * normalizes what a user types - otherwise a code pasted with a stray dash or
+ * in lower case would never match its env entry.
+ */
+function codeListFromEnv(name: string): string[] {
+  const raw = process.env[name] ?? '';
+  const codes = raw
+    .split(',')
+    .map((code) => normalizeRedeemCode(code))
+    .filter((code) => code.length > 0);
+  return [...new Set(codes)];
+}
+
+/**
+ * Canonical form of a redeem code: upper case, with everything that isn't a
+ * letter or digit stripped. Users retype codes with spaces and hyphens, and the
+ * comparison has to be against one stable form on both sides.
+ */
+export function normalizeRedeemCode(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 export function loadConfig(): Config {
   return {
     apifyToken: required('APIFY_TOKEN'),
@@ -111,6 +164,9 @@ export function loadConfig(): Config {
     upstashUrl: process.env.UPSTASH_REDIS_REST_URL ?? '',
     upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN ?? '',
     monthlyDeviceExtractionLimit: numberFromEnv('MONTHLY_DEVICE_EXTRACTION_LIMIT', 30),
+    plusDeviceExtractionLimit: numberFromEnv('PLUS_DEVICE_EXTRACTION_LIMIT', 200),
+    plusRedeemCodes: codeListFromEnv('PLUS_REDEEM_CODES'),
+    plusGrantDays: nonNegativeFromEnv('PLUS_GRANT_DAYS', 0),
     globalDailyExtractionLimit: numberFromEnv('GLOBAL_DAILY_EXTRACTION_LIMIT', 50),
     ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
     ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),

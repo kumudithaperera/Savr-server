@@ -23,7 +23,17 @@ import type { Store } from './store.js';
  * from an unlimited web one, so they live in the extract route instead.
  */
 
-const PROTECTED_PATHS = new Set(['/extract', '/improve', '/image-search', '/nutrition']);
+const PROTECTED_PATHS = new Set([
+  '/extract',
+  '/improve',
+  '/image-search',
+  '/nutrition',
+  // Redemption doesn't spend anything upstream, but an open /redeem is an open
+  // invitation to walk the code space, and /entitlement would let anyone probe
+  // whether a given device id holds Plus.
+  '/redeem',
+  '/entitlement',
+]);
 const APP_KEY_HEADER = 'x-morsel-app-key';
 
 /**

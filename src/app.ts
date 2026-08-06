@@ -14,13 +14,18 @@ import { registerExtractRoute, statsKey, type ExtractLimits } from './routes/ext
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
 import { registerNutritionRoute } from './routes/nutrition.js';
+import { registerRedeemRoute, type RedeemOptions } from './routes/redeem.js';
 
 /** Limits with the same defaults as `config.ts`, so tests need not supply them. */
 const DEFAULT_LIMITS: ExtractLimits = {
   monthlyDeviceExtractionLimit: 30,
+  plusDeviceExtractionLimit: 200,
   globalDailyExtractionLimit: 50,
   extractCacheTtlDays: 365,
 };
+
+/** No codes issued by default, so tests can't accidentally redeem one. */
+const DEFAULT_REDEEM: RedeemOptions = { plusRedeemCodes: [], plusGrantDays: 0 };
 
 export interface AppDeps {
   instagramScraper: InstagramScraper;
@@ -40,6 +45,8 @@ export interface AppDeps {
    */
   store?: Store;
   limits?: ExtractLimits;
+  /** Issued Plus codes + grant lifetime. Omitted = redemption disabled. */
+  redeem?: RedeemOptions;
   rateLimit?: RateLimitOptions;
 }
 
@@ -93,6 +100,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerImproveRoute(app, deps);
   registerImageSearchRoute(app, deps);
   registerNutritionRoute(app, deps);
+  registerRedeemRoute(app, { store, redeem: deps.redeem ?? DEFAULT_REDEEM });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {

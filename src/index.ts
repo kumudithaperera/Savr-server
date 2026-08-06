@@ -23,8 +23,13 @@ const app = buildApp({
   store: createStore({ upstashUrl: config.upstashUrl, upstashToken: config.upstashToken }),
   limits: {
     monthlyDeviceExtractionLimit: config.monthlyDeviceExtractionLimit,
+    plusDeviceExtractionLimit: config.plusDeviceExtractionLimit,
     globalDailyExtractionLimit: config.globalDailyExtractionLimit,
     extractCacheTtlDays: config.extractCacheTtlDays,
+  },
+  redeem: {
+    plusRedeemCodes: config.plusRedeemCodes,
+    plusGrantDays: config.plusGrantDays,
   },
   rateLimit: { max: config.ipRateLimitMax, windowMs: config.ipRateLimitWindowMs },
 });
@@ -41,6 +46,13 @@ if (!config.upstashUrl) {
   app.log.warn(
     'UPSTASH_REDIS_REST_URL is unset - rate limits, quotas and the extraction cache are in-memory and reset on every restart.',
   );
+  if (config.plusRedeemCodes.length > 0) {
+    app.log.warn(
+      `PLUS_REDEEM_CODES lists ${config.plusRedeemCodes.length} code(s) with no Upstash store - ` +
+        'redemption state is in-memory, so every redeploy makes those codes reusable. ' +
+        'Configure Upstash before issuing any code.',
+    );
+  }
 }
 
 app

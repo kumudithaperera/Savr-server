@@ -66,15 +66,58 @@ Both routes exist so the Pexels and USDA keys stay here. They used to live in th
 `EXPO_PUBLIC_*` vars, which Expo inlines into the JS bundle at build time - extractable from
 the shipped APK by anyone who unzips it. Both are guarded like `/extract`.
 
+### `POST /redeem`
+
+Body `{ "code": "K4RT9XZ2QM" }` → `{ "plus": true, "expiresAt": null }`. Grants Morsel Plus
+for free to the calling install (`x-morsel-device-id`). Matching ignores case, spaces and
+hyphens.
+
+Errors: `422 invalid_code` (unknown code, or redemption disabled - answered identically so
+probing tells you nothing), `409 code_already_used` (claimed by a different install),
+`429 rate_limited` (5 wrong codes per hour, per install and per IP), `400 bad_request`
+(empty). Re-redeeming on the **same** install succeeds and keeps the original expiry, so a
+reinstall recovers the grant but can't extend a time-limited one.
+
+### `GET /entitlement`
+
+→ `{ "plus": boolean, "expiresAt": number | null, "source": "code" | null }` for the calling
+install. The app calls this on every launch, which is what makes revoking a code take effect:
+a definitive `plus: false` clears the app's stored grant. A failed call leaves it alone, so
+being offline never costs someone their Plus.
+
+#### Issuing and revoking codes
+
+There is no database here, so the issued list is the `PLUS_REDEEM_CODES` env var and only
+redemption *state* lives in the store. **Adding or revoking a code is an env edit plus a
+redeploy.** Generate high-entropy codes - the store fails open, so the attempt limiter is a
+speed bump, not a guarantee:
+
+```sh
+node -e "console.log(require('crypto').randomBytes(8).toString('base64url').toUpperCase().slice(0,10))"
+```
+
+> **Upstash is required before issuing any code.** Without it, redemption state is in-memory
+> and every redeploy makes every code reusable. Confirm with `GET /health` reporting
+> `"store": "upstash"`.
+
+To revoke: remove the code from `PLUS_REDEEM_CODES` and delete that install's
+`redeem:dev:<deviceId>` key.
+
+An active grant also raises the caller's monthly extraction cap from
+`MONTHLY_DEVICE_EXTRACTION_LIMIT` to `PLUS_DEVICE_EXTRACTION_LIMIT`. That is read from the
+grant record this server wrote - never from a client-supplied plan claim. Paid RevenueCat
+subscribers are **not** recognised yet and are still capped at the free limit.
+
 ### `GET /health`
 
-Returns `{ "status": "ok" }`. Unguarded.
+Returns `{ "status": "ok", "store": …, "cache": … }`. Unguarded.
 
 ## Abuse & cost controls
 
 Morsel has no user accounts, so the protected routes - `/extract`, `/improve`,
-`/image-search` and `/nutrition` - are covered by four layers instead. All of them
-are configured through env vars (see `.env.example`).
+`/image-search`, `/nutrition`, `/redeem` and `/entitlement` - are covered by four layers
+instead. All of them are configured through env vars (see `.env.example`). `/redeem` adds a
+fifth of its own: 5 failed code attempts per hour, per install and per IP.
 
 > **`APP_SHARED_SECRET` must actually be set.** The shared-secret layer is skipped
 > entirely when it is empty, and the app only sends the header when its own
