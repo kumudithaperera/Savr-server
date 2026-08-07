@@ -26,6 +26,9 @@ const DEFAULT_LIMITS: ExtractLimits = {
   extractCacheTtlDays: 365,
 };
 
+/** Same, for the `/improve` daily ceiling. See `config.ts` for the sizing. */
+const DEFAULT_GLOBAL_DAILY_IMPROVE_LIMIT = 150;
+
 /** No codes issued by default, so tests can't accidentally redeem one. */
 const DEFAULT_REDEEM: RedeemOptions = { plusRedeemCodes: [], plusGrantDays: 0 };
 
@@ -47,6 +50,12 @@ export interface AppDeps {
    */
   store?: Store;
   limits?: ExtractLimits;
+  /**
+   * Service-wide AI improvements per day (`/improve`). Separate from the
+   * extraction ceiling in `limits` - see `routes/improve.ts` for why the two
+   * budgets are not pooled.
+   */
+  globalDailyImproveLimit?: number;
   /** Issued Plus codes + grant lifetime. Omitted = redemption disabled. */
   redeem?: RedeemOptions;
   rateLimit?: RateLimitOptions;
@@ -114,7 +123,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerExtractRoute(app, { ...deps, store, limits, supabase });
-  registerImproveRoute(app, deps);
+  registerImproveRoute(app, {
+    ...deps,
+    store,
+    globalDailyImproveLimit: deps.globalDailyImproveLimit ?? DEFAULT_GLOBAL_DAILY_IMPROVE_LIMIT,
+  });
   registerImageSearchRoute(app, deps);
   registerNutritionRoute(app, deps);
   registerRedeemRoute(app, { store, supabase, redeem: deps.redeem ?? DEFAULT_REDEEM });

@@ -10,6 +10,7 @@ import { resolveEntitlement } from '../lib/entitlement.js';
 import { atCapacity, quotaExceeded } from '../lib/errors.js';
 import { deviceIdOf } from '../lib/grants.js';
 import { normalizeRecipe } from '../lib/normalize.js';
+import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, dayKey, monthKey } from '../lib/period.js';
 import type { Store } from '../lib/store.js';
 import type { Supabase } from '../lib/supabase.js';
 import type { ExtractedRecipe } from '../lib/types.js';
@@ -89,18 +90,6 @@ function cacheKey(canonical: string): string {
 const STATS_TTL_SECONDS = 60 * 24 * 60 * 60;
 export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
   `stats:${kind}:${monthKey(now)}`;
-
-/** Calendar-month key, matching the app's month-based reset. */
-function monthKey(now: Date): string {
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function dayKey(now: Date): string {
-  return now.toISOString().slice(0, 10);
-}
-
-const MONTH_TTL_SECONDS = 35 * 24 * 60 * 60;
-const DAY_TTL_SECONDS = 48 * 60 * 60;
 
 /**
  * Registers `POST /extract`. The pipeline: validate URL -> serve from cache if

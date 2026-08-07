@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from './app.js';
-import { unprocessable } from './lib/errors.js';
+import { unprocessable, upstreamError } from './lib/errors.js';
 import type { ScrapedPost } from './lib/types.js';
 
 /**
@@ -292,6 +292,78 @@ describe('global daily circuit breaker', () => {
 
     await extract(app, TIKTOK(1));
     expect((await extract(app, 'https://example.com/soup')).statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+// --- /improve -------------------------------------------------------------
+
+const RECIPE = { title: 'Pancakes', ingredients: ['flour', 'eggs'], steps: ['mix'] };
+
+/** An improver stub that records it was called and returns a fixed result. */
+function stubImprover() {
+  return {
+    suggestSubstitutes: vi.fn(async () => ({ substitutes: [] })),
+    makeHealthier: vi.fn(async () => ({ title: 'Pancakes', ingredients: [], steps: [] })),
+    reconcileSteps: vi.fn(async () => ({ steps: [] })),
+  } as unknown as AppDeps['improver'];
+}
+
+function improve(app: ReturnType<typeof buildApp>, mode = 'substitutes') {
+  return app.inject({ method: 'POST', url: '/improve', payload: { mode, recipe: RECIPE } });
+}
+
+describe('improve daily circuit breaker', () => {
+  it('stops AI improvements for everyone once the day is spent', async () => {
+    const app = buildApp(makeDeps({ improver: stubImprover(), globalDailyImproveLimit: 1 }));
+
+    expect((await improve(app)).statusCode).toBe(200);
+    const overflow = await improve(app, 'healthier');
+
+    expect(overflow.statusCode).toBe(503);
+    expect(overflow.json().code).toBe('at_capacity');
+    await app.close();
+  });
+
+  it('counts a failed improvement, which already cost us a Gemini request', async () => {
+    const improver = stubImprover();
+    improver.suggestSubstitutes = vi.fn(async () => {
+      throw upstreamError('Gemini said no.');
+    });
+    const app = buildApp(makeDeps({ improver, globalDailyImproveLimit: 1 }));
+
+    expect((await improve(app)).statusCode).toBe(502);
+    expect((await improve(app)).statusCode).toBe(503);
+    await app.close();
+  });
+
+  it('does not charge the ceiling for a body that never reaches Gemini', async () => {
+    const improver = stubImprover();
+    const app = buildApp(makeDeps({ improver, globalDailyImproveLimit: 1 }));
+
+    // Rejected on validation, so the one allowance of the day is still there.
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/improve',
+      payload: { mode: 'nonsense', recipe: RECIPE },
+    });
+    expect(rejected.statusCode).toBe(422);
+
+    expect((await improve(app)).statusCode).toBe(200);
+    expect(improver.suggestSubstitutes).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it('leaves the extraction budget alone', async () => {
+    const app = buildApp(
+      makeDeps({ improver: stubImprover(), globalDailyImproveLimit: 1 }),
+    );
+
+    // Spending the improve ceiling must not close the separate extract ceiling:
+    // /improve costs Gemini only, never the Apify credit /extract is sized on.
+    expect((await improve(app)).statusCode).toBe(200);
+    expect((await improve(app)).statusCode).toBe(503);
+    expect((await extract(app, TIKTOK(1))).statusCode).toBe(200);
     await app.close();
   });
 });

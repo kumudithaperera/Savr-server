@@ -44,6 +44,7 @@ const app = buildApp({
     plusRedeemCodes: config.plusRedeemCodes,
     plusGrantDays: config.plusGrantDays,
   },
+  globalDailyImproveLimit: config.globalDailyImproveLimit,
   rateLimit: { max: config.ipRateLimitMax, windowMs: config.ipRateLimitWindowMs },
 });
 

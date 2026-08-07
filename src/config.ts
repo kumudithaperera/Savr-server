@@ -93,6 +93,17 @@ export interface Config {
    * leave everyone without extraction. See server/README.md for the sizing math.
    */
   globalDailyExtractionLimit: number;
+  /**
+   * Service-wide AI improvements per day (`/improve`, the AI Kitchen Assistant).
+   * The same availability guard as `globalDailyExtractionLimit`, but with its own
+   * budget: `/improve` spends Gemini only, never Apify, so pooling the two would
+   * let the assistant consume an extraction allowance sized against Apify credit.
+   *
+   * Sized against the Gemini free tier's per-project daily request ceiling, which
+   * both routes draw on: extraction is one Gemini call per uncached metered link,
+   * so a full 50-extraction day plus this leaves headroom under that ceiling.
+   */
+  globalDailyImproveLimit: number;
   /** Per-IP fixed-window rate limit on the protected routes. */
   ipRateLimitMax: number;
   ipRateLimitWindowMs: number;
@@ -201,6 +212,7 @@ export function loadConfig(): Config {
     plusRedeemCodes: codeListFromEnv('PLUS_REDEEM_CODES'),
     plusGrantDays: nonNegativeFromEnv('PLUS_GRANT_DAYS', 0),
     globalDailyExtractionLimit: numberFromEnv('GLOBAL_DAILY_EXTRACTION_LIMIT', 50),
+    globalDailyImproveLimit: numberFromEnv('GLOBAL_DAILY_IMPROVE_LIMIT', 150),
     ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
     ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),
     extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 365),

@@ -1,11 +1,23 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { RecipeImprover } from '../services/improve.js';
-import { unprocessable } from '../lib/errors.js';
+import { atCapacity, unprocessable } from '../lib/errors.js';
+import { DAY_TTL_SECONDS, dayKey } from '../lib/period.js';
+import type { Store } from '../lib/store.js';
 import type { RecipeInput } from '../lib/types.js';
 
 interface ImproveDeps {
   improver: RecipeImprover;
+  store: Store;
+  /**
+   * Service-wide AI improvements per day. `/improve` and `/extract` both spend
+   * the same project-wide Gemini free-tier allowance, but they get **separate**
+   * daily ceilings on purpose: the extraction ceiling is sized against Apify's
+   * credit, which `/improve` doesn't touch, so pooling them would let the AI
+   * Kitchen Assistant eat an extraction budget it costs nothing towards - and
+   * conversely leave improvements hostage to a busy extraction day.
+   */
+  globalDailyImproveLimit: number;
 }
 
 type ImproveMode = 'substitutes' | 'healthier' | 'reconcile-steps';
@@ -50,17 +62,37 @@ function assertRecipeInput(value: unknown): RecipeInput {
 }
 
 /**
- * Registers `POST /improve`. Body: `{ mode, recipe, goal? }`. Dispatches to the
- * matching AI improvement (substitutes or healthier rewrite). Error mapping is
- * handled centrally.
+ * Registers `POST /improve`. Body: `{ mode, recipe, goal? }`. Validates the
+ * body, charges the global daily ceiling, then dispatches to the matching AI
+ * improvement (substitutes or healthier rewrite). Error mapping is handled
+ * centrally.
  */
 export function registerImproveRoute(app: FastifyInstance, deps: ImproveDeps): void {
+  const { store, globalDailyImproveLimit } = deps;
+
   app.post<{ Body: ImproveBody }>('/improve', async (request) => {
     const mode = request.body?.mode as ImproveMode;
     if (mode !== 'substitutes' && mode !== 'healthier' && mode !== 'reconcile-steps') {
       throw unprocessable("mode must be 'substitutes', 'healthier', or 'reconcile-steps'.");
     }
     const recipe = assertRecipeInput(request.body?.recipe);
+
+    // Charged after validation but before the call, and counted on every
+    // attempt rather than on success: a Gemini request that errors out has
+    // already been billed against the project's daily allowance, so only
+    // counting successes would let a failing day run straight through the
+    // ceiling. Rejected bodies never reach here and cost nothing.
+    //
+    // Unlike `/extract` this ceiling applies to Plus members too. It is not a
+    // per-user allowance - it is the point past which the shared free-tier
+    // quota is gone and the next call would 502 for everyone.
+    const today = await store.incrWithTtl(`g:day:improve:${dayKey(new Date())}`, DAY_TTL_SECONDS);
+    if (today > globalDailyImproveLimit) {
+      request.log.warn({ today, mode }, 'global daily improve ceiling reached');
+      throw atCapacity(
+        "Morsel's AI assistant is at capacity today. Please try again tomorrow - everything else on the recipe still works.",
+      );
+    }
 
     if (mode === 'substitutes') {
       return deps.improver.suggestSubstitutes(recipe);
