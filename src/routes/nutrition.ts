@@ -15,14 +15,17 @@ interface NutritionBody {
 const MAX_QUERY_LENGTH = 200;
 
 /**
- * Registers `POST /nutrition`. Body: `{ query }`. Returns `{ macros }` - the
- * per-100 g macros for the best-matching USDA food, or null when nothing
- * matched, which the app treats as "skip this ingredient".
+ * Registers `POST /nutrition`. Body: `{ query }`. Returns `{ macros, micros }` -
+ * the per-100 g macros and micronutrients for the best-matching USDA food, or
+ * both null when nothing matched, which the app treats as "skip this ingredient"
+ * (macros) / "no breakdown to show" (micros).
  *
  * Exists so the USDA key lives on the server instead of in the app bundle. The
  * app calls this once per distinct ingredient during a nutrition cross-check, so
  * it is chattier than /extract but individually cheap; the per-IP rate limit on
- * the protected paths is what bounds it.
+ * the protected paths is what bounds it. The micros ride on the same call as
+ * the macros - FDC returns both in the one search response, so there is no
+ * second upstream hit for Morsel Plus "advanced nutrition".
  */
 export function registerNutritionRoute(app: FastifyInstance, deps: NutritionDeps): void {
   app.post<{ Body: NutritionBody }>('/nutrition', async (request) => {
@@ -35,6 +38,7 @@ export function registerNutritionRoute(app: FastifyInstance, deps: NutritionDeps
       throw badRequest('That query is too long.');
     }
 
-    return { macros: await deps.nutrition.search(query) };
+    const nutrition = await deps.nutrition.search(query);
+    return nutrition ?? { macros: null, micros: null };
   });
 }

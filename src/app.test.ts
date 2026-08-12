@@ -31,6 +31,24 @@ const macros = {
   fatPer100g: 0.2,
 };
 
+const micros = {
+  fiberG: 2.4,
+  sugarsG: 10.4,
+  sodiumMg: 1,
+  potassiumMg: 107,
+  calciumMg: 6,
+  ironMg: 0.12,
+  magnesiumMg: 5,
+  zincMg: 0.04,
+  saturatedFatG: 0,
+  monounsaturatedFatG: 0,
+  polyunsaturatedFatG: 0.1,
+  cholesterolMg: 0,
+  vitaminCMg: 4.6,
+  vitaminARaeUg: 3,
+  vitaminDUg: 0,
+};
+
 function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     instagramScraper: stubScraper('ig'),
@@ -39,7 +57,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     parser: { parse: vi.fn(async () => parsed) },
     improver: {} as AppDeps['improver'],
     photoSearch: { search: vi.fn(async () => 'https://images.example/photo.jpg') },
-    nutrition: { search: vi.fn(async () => macros) },
+    nutrition: { search: vi.fn(async () => ({ macros, micros })) },
     appSharedSecret: '',
     ...overrides,
   };
@@ -506,11 +524,12 @@ describe('POST /nutrition', () => {
       payload: { query: 'apple' },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ macros });
+    expect(res.json()).toEqual({ macros, micros });
+    expect(deps.nutrition.search).toHaveBeenCalledWith('apple');
     await app.close();
   });
 
-  it('returns null macros when nothing matched', async () => {
+  it('returns null macros and micros when nothing matched', async () => {
     const app = buildApp(makeDeps({ nutrition: { search: vi.fn(async () => null) } }));
     const res = await app.inject({
       method: 'POST',
@@ -518,7 +537,7 @@ describe('POST /nutrition', () => {
       payload: { query: 'nonsense' },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ macros: null });
+    expect(res.json()).toEqual({ macros: null, micros: null });
     await app.close();
   });
 

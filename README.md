@@ -57,10 +57,12 @@ unset, since the app treats a missing photo as a no-op.
 
 ### `POST /nutrition`
 
-Body `{ "query": "plain flour" }` → `{ "macros": { … } | null }`. Best-matching USDA
-FoodData Central food's per-100 g macros, or `null` when nothing usable matched. Falls back
-to USDA's shared `DEMO_KEY` when `USDA_API_KEY` is unset - that key is rate-limited across
-every caller using it worldwide, so set a real one.
+Body `{ "query": "plain flour" }` → `{ "macros": { … }, "micros": { … } }`, or both `null` when
+nothing usable matched. The best-matching USDA FoodData Central food's per-100 g macros and
+micronutrients (fiber, sugars, sodium, vitamins, minerals - the Morsel Plus "advanced nutrition"
+breakdown). Both sides ride on the one FDC `foods/search` call, so the micros cost nothing extra.
+Falls back to USDA's shared `DEMO_KEY` when `USDA_API_KEY` is unset - that key is rate-limited
+across every caller using it worldwide, so set a real one.
 
 Both routes exist so the Pexels and USDA keys stay here. They used to live in the app as
 `EXPO_PUBLIC_*` vars, which Expo inlines into the JS bundle at build time - extractable from

@@ -21,6 +21,31 @@ const FDC_SEARCH = 'https://api.nal.usda.gov/fdc/v1/foods/search';
  */
 const NUTRIENT = { calories: 1008, protein: 1003, fat: 1004, carbs: 1005 } as const;
 
+/**
+ * Micronutrients we surface for Morsel Plus "advanced nutrition", keyed by FDC
+ * `nutrientId`. These are the SR Legacy ids - the search results this service
+ * actually selects from (Foundation rows carry no macros, so food picking
+ * always falls through to SR Legacy). Verified live against
+ * `https://api.nal.usda.gov/fdc/v1/foods/search`.
+ */
+const MICRONUTRIENT = {
+  fiber: 1079, // Fiber, total dietary (g)
+  sugars: 2000, // Total Sugars (g)
+  sodium: 1093, // Sodium, Na (mg)
+  potassium: 1092, // Potassium, K (mg)
+  calcium: 1087, // Calcium, Ca (mg)
+  iron: 1089, // Iron, Fe (mg)
+  magnesium: 1090, // Magnesium, Mg (mg)
+  zinc: 1095, // Zinc, Zn (mg)
+  saturatedFat: 1258, // Fatty acids, total saturated (g)
+  monounsaturatedFat: 1292, // Fatty acids, total monounsaturated (g)
+  polyunsaturatedFat: 1293, // Fatty acids, total polyunsaturated (g)
+  cholesterol: 1253, // Cholesterol (mg)
+  vitaminC: 1162, // Vitamin C, total ascorbic acid (mg)
+  vitaminARae: 1106, // Vitamin A, RAE (µg)
+  vitaminD: 1114, // Vitamin D (D2 + D3) (µg)
+} as const;
+
 /** Macros per 100 g for a single USDA food. Mirrors the app's `FoodMacros`. */
 export interface FoodMacros {
   caloriesPer100g: number;
@@ -29,9 +54,34 @@ export interface FoodMacros {
   fatPer100g: number;
 }
 
+/** Micronutrients per 100 g for a single USDA food. Mirrors the app's `FoodMicros`. */
+export interface FoodMicros {
+  fiberG: number;
+  sugarsG: number;
+  sodiumMg: number;
+  potassiumMg: number;
+  calciumMg: number;
+  ironMg: number;
+  magnesiumMg: number;
+  zincMg: number;
+  saturatedFatG: number;
+  monounsaturatedFatG: number;
+  polyunsaturatedFatG: number;
+  cholesterolMg: number;
+  vitaminCMg: number;
+  vitaminARaeUg: number;
+  vitaminDUg: number;
+}
+
+/** A matched USDA food's macro and micronutrient profile, per 100 g. */
+export interface FoodNutrition {
+  macros: FoodMacros;
+  micros: FoodMicros;
+}
+
 export interface NutritionLookup {
-  /** Best-matching food's per-100 g macros, or null when nothing usable matched. */
-  search(query: string): Promise<FoodMacros | null>;
+  /** Best-matching food's per-100 g nutrition, or null when nothing usable matched. */
+  search(query: string): Promise<FoodNutrition | null>;
 }
 
 interface FdcNutrient {
@@ -58,6 +108,26 @@ function toMacros(food: FdcFood): FoodMacros {
   };
 }
 
+function toMicros(food: FdcFood): FoodMicros {
+  return {
+    fiberG: readNutrient(food, MICRONUTRIENT.fiber),
+    sugarsG: readNutrient(food, MICRONUTRIENT.sugars),
+    sodiumMg: readNutrient(food, MICRONUTRIENT.sodium),
+    potassiumMg: readNutrient(food, MICRONUTRIENT.potassium),
+    calciumMg: readNutrient(food, MICRONUTRIENT.calcium),
+    ironMg: readNutrient(food, MICRONUTRIENT.iron),
+    magnesiumMg: readNutrient(food, MICRONUTRIENT.magnesium),
+    zincMg: readNutrient(food, MICRONUTRIENT.zinc),
+    saturatedFatG: readNutrient(food, MICRONUTRIENT.saturatedFat),
+    monounsaturatedFatG: readNutrient(food, MICRONUTRIENT.monounsaturatedFat),
+    polyunsaturatedFatG: readNutrient(food, MICRONUTRIENT.polyunsaturatedFat),
+    cholesterolMg: readNutrient(food, MICRONUTRIENT.cholesterol),
+    vitaminCMg: readNutrient(food, MICRONUTRIENT.vitaminC),
+    vitaminARaeUg: readNutrient(food, MICRONUTRIENT.vitaminARae),
+    vitaminDUg: readNutrient(food, MICRONUTRIENT.vitaminD),
+  };
+}
+
 /**
  * Normalizes a free-text food name into something FDC's search accepts. Notably
  * the endpoint returns HTTP 400 on an encoded "/" (e.g. "oil/butter"), so
@@ -76,7 +146,7 @@ export function createUsdaNutritionLookup(deps: { usdaApiKey: string }): Nutriti
   const apiKey = deps.usdaApiKey || 'DEMO_KEY';
 
   return {
-    async search(query: string): Promise<FoodMacros | null> {
+    async search(query: string): Promise<FoodNutrition | null> {
       const clean = sanitizeQuery(query);
       if (!clean) return null;
 
@@ -117,7 +187,7 @@ export function createUsdaNutritionLookup(deps: { usdaApiKey: string }): Nutriti
 
       // Prefer the first result that reports calories; fall back to no match.
       const usable = foods.find((f) => readNutrient(f, NUTRIENT.calories) > 0);
-      return usable ? toMacros(usable) : null;
+      return usable ? { macros: toMacros(usable), micros: toMicros(usable) } : null;
     },
   };
 }
