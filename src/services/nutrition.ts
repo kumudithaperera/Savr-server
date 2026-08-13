@@ -10,6 +10,8 @@
 
 import { upstreamError } from '../lib/errors.js';
 import { HttpError } from '../lib/errors.js';
+import { brandTokens } from './brand.js';
+import type { OffLookup } from './openfoodfacts.js';
 
 const FDC_SEARCH = 'https://api.nal.usda.gov/fdc/v1/foods/search';
 
@@ -188,6 +190,50 @@ export function createUsdaNutritionLookup(deps: { usdaApiKey: string }): Nutriti
       // Prefer the first result that reports calories; fall back to no match.
       const usable = foods.find((f) => readNutrient(f, NUTRIENT.calories) > 0);
       return usable ? { macros: toMacros(usable), micros: toMicros(usable) } : null;
+    },
+  };
+}
+
+/**
+ * Combines the two nutrition sources behind the `/nutrition` route: Open Food
+ * Facts first only when the ingredient text names a specific branded product,
+ * with USDA FoodData Central as the generic fallback.
+ *
+ * Flow for a query like "200g barilla spaghetti":
+ *
+ *  1. `brandTokens()` spots the brand (e.g. "barilla"). No brand tokens (e.g.
+ *     "plain flour") short-circuits straight to USDA - generic ingredients
+ *     never spend an OFF call.
+ *  2. OFF is searched with the brand tokens as a filter, so it only returns a
+ *     product that actually carries that brand. A hit wins the check.
+ *  3. OFF returning null (no brand-confirmed product) or failing to reach its
+ *     API falls through to USDA's generic value - the exact behavior the app
+ *     had before this source existed, never a broken check or a wrong answer.
+ *
+ * This is OFF as an *accuracy* boost for named products, not a replacement for
+ * USDA: branded items get real label values, everything else stays on the
+ * reference database the app was built around.
+ */
+export function createBrandFirstNutritionLookup(deps: {
+  usda: NutritionLookup;
+  off: OffLookup;
+}): NutritionLookup {
+  return {
+    async search(query: string): Promise<FoodNutrition | null> {
+      const clean = sanitizeQuery(query);
+      if (!clean) return deps.usda.search(query);
+
+      const brands = brandTokens(clean);
+      if (brands.length === 0) return deps.usda.search(query);
+
+      let branded: FoodNutrition | null = null;
+      try {
+        branded = await deps.off.search(query, { brandTokens: brands });
+      } catch {
+        // OFF down doesn't fail the check - fall through to USDA below.
+      }
+      if (branded) return branded;
+      return deps.usda.search(query);
     },
   };
 }

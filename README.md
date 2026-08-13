@@ -58,11 +58,30 @@ unset, since the app treats a missing photo as a no-op.
 ### `POST /nutrition`
 
 Body `{ "query": "plain flour" }` → `{ "macros": { … }, "micros": { … } }`, or both `null` when
-nothing usable matched. The best-matching USDA FoodData Central food's per-100 g macros and
-micronutrients (fiber, sugars, sodium, vitamins, minerals - the Morsel Plus "advanced nutrition"
-breakdown). Both sides ride on the one FDC `foods/search` call, so the micros cost nothing extra.
-Falls back to USDA's shared `DEMO_KEY` when `USDA_API_KEY` is unset - that key is rate-limited
-across every caller using it worldwide, so set a real one.
+nothing usable matched.
+
+This is now a **two-source** lookup (see `services/nutrition.ts` / `services/openfoodfacts.ts`):
+
+- If the ingredient names a **specific branded product** ("Barilla spaghetti", "Heinz baked
+  beans") the check asks **Open Food Facts** first, and only accepts a product that actually
+  carries that brand. The winner's real label values fill the card.
+- Any ingredient without a brand token — and any branded ingredient OFF can't confidently
+  place — falls back to the **USDA FoodData Central** generic reference value the app has
+  always used. OFF is an accuracy boost for named products, never a replacement for USDA:
+  generic ingredients don't spend an OFF call, and an OFF outage degrades to USDA-only rather
+  than failing the check.
+
+OFF is a free, no-key JSON API (search-a-licious). Its API's **Authentication**
+section requires every read request to carry a `User-Agent` in the
+`AppName/Version (ContactEmail)` form, so the server sends
+`Morsel/1.0 (<OFF_CONTACT_EMAIL>)` and refuses to ship without one configured in
+production (`server/src/index.ts` logs a warning when it's unset). It also
+requests only the fields it needs. The micros (fiber, sugars, sodium,
+saturated fat) ride along in the `nutriments`, so the Morsel Plus "advanced
+nutrition" breakdown still fills where OFF carries the value (USDA supplies the
+vitamins/minerals). Falls back to USDA's shared `DEMO_KEY` when `USDA_API_KEY`
+is unset - that key is rate-limited across every caller using it worldwide, so
+set a real one.
 
 Both routes exist so the Pexels and USDA keys stay here. They used to live in the app as
 `EXPO_PUBLIC_*` vars, which Expo inlines into the JS bundle at build time - extractable from
