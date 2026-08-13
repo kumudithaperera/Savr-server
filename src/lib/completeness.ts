@@ -33,6 +33,22 @@ export const DEFAULT_THRESHOLDS: CompletenessThresholds = {
   minCaptionLength: 80,
 };
 
+/** Whether a caption looks like it could hold a recipe, before any LLM sees it. */
+export type CaptionVerdict = 'ok' | 'no-caption' | 'no-recipe-text';
+
+/**
+ * Cheap pre-LLM check on a caption alone (empty, or just hashtags/mentions/
+ * emoji). Lets the route skip straight to the video fallback for a post whose
+ * caption can't possibly hold a recipe, instead of spending a DeepSeek and a
+ * Gemini call on text that's already known to be unusable.
+ */
+export function assessCaption(caption: string): CaptionVerdict {
+  if (caption.trim().length === 0) return 'no-caption';
+  return captionProse(caption).length < DEFAULT_THRESHOLDS.minCaptionLength
+    ? 'no-recipe-text'
+    : 'ok';
+}
+
 /** Result of a completeness assessment. */
 export interface CompletenessResult {
   /** Whether the extraction is considered complete enough to use. */

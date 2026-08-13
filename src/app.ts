@@ -38,9 +38,9 @@ export interface AppDeps {
   instagramScraper: InstagramScraper;
   tiktokScraper: TikTokScraper;
   webScraper: WebScraper;
-  /** Level 1: Primary text-based recipe parser. */
+  /** Level 2: Gemini text parser, used when DeepSeek is unavailable or insufficient. */
   parser: RecipeParser;
-  /** Level 2: DeepSeek text parser for low-cost text analysis. */
+  /** Level 1: DeepSeek text parser - cheap, tried first to hold down Gemini usage. */
   deepseekParser?: DeepSeekRecipeParser;
   /** Level 3: Video-understanding recipe parser for multimodal fallback. */
   videoParser?: VideoRecipeParser;

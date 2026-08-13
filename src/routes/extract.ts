@@ -8,7 +8,7 @@ import type { RecipeParser } from '../services/gemini.js';
 import type { VideoRecipeParser } from '../services/gemini-video.js';
 import type { TikTokScraper } from '../services/tiktok.js';
 import type { WebScraper } from '../services/web.js';
-import { assessCompleteness, shouldTriggerFallback } from '../lib/completeness.js';
+import { assessCaption, assessCompleteness } from '../lib/completeness.js';
 import { resolveEntitlement } from '../lib/entitlement.js';
 import { HttpError, atCapacity, quotaExceeded, unprocessable } from '../lib/errors.js';
 import { deviceIdOf } from '../lib/grants.js';
@@ -39,9 +39,9 @@ interface ExtractDeps {
   instagramScraper: InstagramScraper;
   tiktokScraper: TikTokScraper;
   webScraper: WebScraper;
-  /** Level 1: Primary text-based recipe parser (existing Gemini). */
+  /** Level 2: Gemini text parser, used when DeepSeek is unavailable or insufficient. */
   parser: RecipeParser;
-  /** Level 2: DeepSeek text parser for low-cost text analysis. */
+  /** Level 1: DeepSeek text parser - cheap, tried first to hold down Gemini usage. */
   deepseekParser?: DeepSeekRecipeParser;
   /** Level 3: Video-understanding parser for multimodal fallback. */
   videoParser?: VideoRecipeParser;
@@ -106,13 +106,14 @@ export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
 export const fallbackStatsKey = (kind: 'triggered' | 'success' | 'failed', now: Date) =>
   `stats:fallback:${kind}:${monthKey(now)}`;
 
-/** Monthly DeepSeek (Level 2) counters for tracking usage and success rate. */
+/** Monthly DeepSeek (Level 1) counters for tracking usage and success rate. */
 export const deepseekStatsKey = (kind: 'triggered' | 'success' | 'insufficient' | 'failed', now: Date) =>
   `stats:deepseek:${kind}:${monthKey(now)}`;
 
 /**
- * Level 2: Attempts DeepSeek text-based extraction when Level 1 is insufficient.
- * Returns the result with sufficiency assessment, or null if DeepSeek is unavailable.
+ * Level 1: Attempts DeepSeek text-based extraction - tried first since it's
+ * the cheapest of the three levels. Returns the result with a sufficiency
+ * assessment, or null if DeepSeek is unavailable.
  */
 async function tryDeepSeekExtraction(
   deps: ExtractDeps,
@@ -133,7 +134,7 @@ async function tryDeepSeekExtraction(
   }
 
   await store.incrWithTtl(deepseekStatsKey('triggered', now), STATS_TTL_SECONDS);
-  request.log.info({}, 'triggering DeepSeek text extraction (Level 2)');
+  request.log.info({}, 'triggering DeepSeek text extraction (Level 1)');
 
   try {
     const result = await deps.deepseekParser.parseText(
@@ -237,10 +238,11 @@ async function tryVideoFallback(
 /**
  * Registers `POST /extract`. The pipeline: validate URL -> serve from cache if
  * we've seen this link -> meter (global circuit breaker, then per-device monthly
- * quota) for Instagram/TikTok only -> pick the scraper -> parse + estimate macros
- * -> check completeness -> optionally trigger video fallback -> merge results
- * -> normalize -> cache -> return ExtractedRecipe. Error mapping is handled
- * centrally.
+ * quota) for Instagram/TikTok only -> pick the scraper -> DeepSeek text parse,
+ * then Gemini text parse if that's insufficient, then Gemini video analysis if
+ * both are (skipping straight to video when the caption is already known-bad)
+ * -> merge results -> normalize -> cache -> return ExtractedRecipe. Error
+ * mapping is handled centrally.
  */
 export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): void {
   const { store, limits, supabase } = deps;
@@ -312,116 +314,141 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
 
     // =========================================================================
     // THREE-LEVEL EXTRACTION ARCHITECTURE
-    // Level 1: Primary text extraction (existing Gemini text parser)
-    // Level 2: DeepSeek text analysis (cheap, if Level 1 insufficient)
-    // Level 3: Gemini video fallback (expensive, if Level 2 insufficient)
+    // Level 1: DeepSeek text analysis (cheap, tried first to hold down Gemini usage)
+    // Level 2: Gemini text parse (if DeepSeek is unavailable or insufficient)
+    // Level 3: Gemini video fallback (expensive, if Level 1+2 insufficient)
+    //
+    // A caption already known to be unusable (empty, or just hashtags/emoji -
+    // `assessCaption`) skips straight to Level 3 when a video exists: apify/
+    // tiktok have already rejected the no-video case outright, so spending two
+    // text-LLM calls that can't succeed only delays the call that can.
     // =========================================================================
 
-    // LEVEL 1: Primary text-based extraction
+    const captionVerdict = assessCaption(scraped.caption);
+    // Only worth skipping the text levels when there's a video to fall back on -
+    // otherwise a known-bad caption still deserves a shot from both text parsers
+    // (the isRecipe flag is the real backstop for junk), since throwing outright
+    // with no video is strictly worse than trying and failing.
+    const skipTextLevels = captionVerdict !== 'ok' && Boolean(scraped.videoUrl);
+
     let primaryParsed: ParsedRecipe | null = null;
     let primaryError: Error | null = null;
+    let deepseekResult: DeepSeekResult | null = null;
 
-    if (scraped.caption.trim()) {
+    if (skipTextLevels) {
+      request.log.info(
+        { captionVerdict },
+        'caption already known-bad - skipping Levels 1-2, going straight to Level 3 video',
+      );
+    } else {
+      // LEVEL 1: DeepSeek text analysis - cheap, tried first.
+      if (scraped.caption.trim()) {
+        deepseekResult = await tryDeepSeekExtraction(deps, scraped, null, request, now, store);
+      } else {
+        request.log.info({}, 'Level 1: no caption available');
+      }
+    }
+
+    const level1Sufficient = Boolean(
+      deepseekResult?.sufficient && deepseekResult.recipe.isRecipe !== false,
+    );
+    if (level1Sufficient && deepseekResult) {
+      request.log.info(
+        { confidence: deepseekResult.confidence },
+        'Level 1 (DeepSeek) extraction sufficient - stopping',
+      );
+    }
+
+    // LEVEL 2: Gemini text parse - only spent when DeepSeek couldn't close it
+    // out (or isn't configured), and only when the caption wasn't already
+    // known-bad with a video to fall back on instead.
+    if (!level1Sufficient && !skipTextLevels && scraped.caption.trim()) {
       try {
         primaryParsed = await deps.parser.parse(scraped.caption);
       } catch (err) {
         primaryError = err as Error;
         request.log.info(
           { error: primaryError.message },
-          'Level 1 extraction failed',
+          'Level 2 (Gemini text) extraction failed',
         );
       }
-    } else {
-      request.log.info({}, 'Level 1: no caption available');
     }
 
-    // Check if Level 1 result is sufficient
-    let level1Sufficient = false;
-    if (primaryParsed && primaryParsed.isRecipe !== false) {
+    let level2Sufficient = false;
+    if (!level1Sufficient && primaryParsed && primaryParsed.isRecipe !== false) {
       const completeness = assessCompleteness(scraped, primaryParsed);
-      level1Sufficient = completeness.isComplete && completeness.confidence >= 0.6;
-      if (level1Sufficient) {
+      level2Sufficient = completeness.isComplete && completeness.confidence >= 0.6;
+      if (level2Sufficient) {
         request.log.info(
           {
             confidence: completeness.confidence,
             ingredientCount: completeness.details.ingredientCount,
             stepCount: completeness.details.stepCount,
           },
-          'Level 1 extraction sufficient - stopping',
+          'Level 2 (Gemini text) extraction sufficient - stopping',
         );
       }
     }
 
-    // If Level 1 is sufficient, use it directly
     let finalParsed: ParsedRecipe;
 
-    if (level1Sufficient && primaryParsed) {
+    if (level1Sufficient && deepseekResult) {
+      finalParsed = deepseekResult.recipe;
+    } else if (level2Sufficient && primaryParsed) {
       finalParsed = primaryParsed;
     } else {
-      // LEVEL 2: DeepSeek text analysis (if text is available)
-      let deepseekResult: DeepSeekResult | null = null;
+      // LEVEL 3: Gemini video fallback (if video URL available)
+      const needsVideo = Boolean(scraped.videoUrl);
+      let videoParsed: ParsedRecipe | null = null;
 
-      if (scraped.caption.trim()) {
-        deepseekResult = await tryDeepSeekExtraction(
-          deps, scraped, primaryParsed, request, now, store,
+      if (needsVideo) {
+        const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
+        request.log.info(
+          {
+            reason: skipTextLevels
+              ? 'caption_known_bad'
+              : primaryParsed
+                ? 'gemini_insufficient'
+                : 'no_text_result',
+          },
+          'proceeding to Level 3 (Gemini video)',
         );
+        videoParsed = await tryVideoFallback(deps, scraped, bestTextResult, request, now, store);
       }
 
-      // Check if DeepSeek result is sufficient
-      if (deepseekResult?.sufficient && deepseekResult.recipe.isRecipe !== false) {
-        request.log.info(
-          { confidence: deepseekResult.confidence },
-          'Level 2 (DeepSeek) extraction sufficient - stopping',
-        );
+      // Determine final result from all levels
+      if (videoParsed && videoParsed.isRecipe !== false) {
+        // Merge video result with best text result if both available
+        const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
+        if (bestTextResult && bestTextResult.isRecipe !== false) {
+          const merged = mergeRecipes(bestTextResult, videoParsed);
+          request.log.info(
+            {
+              videoContributions: merged.videoContributions,
+              mergedConfidence: merged.mergedConfidence,
+            },
+            'merged text and video extraction results',
+          );
+          finalParsed = merged;
+        } else {
+          finalParsed = videoParsed;
+        }
+      } else if (primaryParsed && primaryParsed.isRecipe !== false) {
+        // Fall back to the Gemini text result
+        finalParsed = primaryParsed;
+      } else if (deepseekResult?.recipe && deepseekResult.recipe.isRecipe !== false) {
+        // DeepSeek had something even if not "sufficient"
         finalParsed = deepseekResult.recipe;
       } else {
-        // LEVEL 3: Gemini video fallback (if video URL available)
-        const needsVideo = !deepseekResult?.sufficient && scraped.videoUrl;
-        let videoParsed: ParsedRecipe | null = null;
-
-        if (needsVideo) {
-          const bestTextResult = deepseekResult?.recipe ?? primaryParsed;
-          request.log.info(
-            { reason: deepseekResult ? 'deepseek_insufficient' : 'no_text_result' },
-            'proceeding to Level 3 (Gemini video)',
-          );
-          videoParsed = await tryVideoFallback(deps, scraped, bestTextResult, request, now, store);
+        // No usable result from any level
+        if (primaryError) {
+          throw primaryError;
         }
-
-        // Determine final result from all levels
-        if (videoParsed && videoParsed.isRecipe !== false) {
-          // Merge video result with best text result if both available
-          const bestTextResult = deepseekResult?.recipe ?? primaryParsed;
-          if (bestTextResult && bestTextResult.isRecipe !== false) {
-            const merged = mergeRecipes(bestTextResult, videoParsed);
-            request.log.info(
-              {
-                videoContributions: merged.videoContributions,
-                mergedConfidence: merged.mergedConfidence,
-              },
-              'merged text and video extraction results',
-            );
-            finalParsed = merged;
-          } else {
-            finalParsed = videoParsed;
-          }
-        } else if (deepseekResult?.recipe && deepseekResult.recipe.isRecipe !== false) {
-          // DeepSeek had something even if not "sufficient"
-          finalParsed = deepseekResult.recipe;
-        } else if (primaryParsed && primaryParsed.isRecipe !== false) {
-          // Fall back to primary result
-          finalParsed = primaryParsed;
-        } else {
-          // No usable result from any level
-          if (primaryError) {
-            throw primaryError;
-          }
-          throw unprocessable(
-            'Could not extract a recipe from this link. The video may not contain a recipe, ' +
-            'or the content could not be analyzed.',
-            'not_a_recipe',
-          );
-        }
+        throw unprocessable(
+          'Could not extract a recipe from this link. The video may not contain a recipe, ' +
+          'or the content could not be analyzed.',
+          'not_a_recipe',
+        );
       }
     }
 

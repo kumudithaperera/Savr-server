@@ -1,6 +1,9 @@
 import type { Config } from '../config.js';
+import { assessCaption } from '../lib/completeness.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
 import type { ScrapedPost } from '../lib/types.js';
+
+export { assessCaption, type CaptionVerdict } from '../lib/completeness.js';
 
 /** Subset of the Apify Instagram Scraper dataset item shape we rely on. */
 interface ApifyInstagramItem {
@@ -21,51 +24,16 @@ export interface InstagramScraper {
 }
 
 /**
- * Morsel reads Instagram recipes out of the post caption - it does not watch the
- * video, transcribe the audio, or OCR on-screen text (see the "Instagram video
- * recipes" entry on the Coming Soon screen). So a Reel whose recipe only exists
- * in the voiceover has nothing for us to parse.
- *
- * Detecting that here, rather than letting Gemini improvise, matters because a
- * successful parse is cached for a year under the post's shortcode and served
- * to *everyone* who pastes that Reel. A caption of pure hashtags used to yield a
- * plausible invented recipe that then became the permanent answer for that post.
- */
-export type CaptionVerdict = 'ok' | 'no-caption' | 'no-recipe-text';
-
-/**
- * Strips the furniture Instagram captions are padded with - hashtags, @mentions,
- * links, emoji - so what remains is the text a recipe would actually live in.
- */
-function captionProse(caption: string): string {
-  return caption
-    .replace(/https?:\/\/\S+/g, ' ')
-    .replace(/[#@][\p{L}\p{N}_.]+/gu, ' ')
-    .replace(/\p{Extended_Pictographic}/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Shortest caption we'll accept as possibly holding a recipe. Even a terse one
- * ("1 cup toor dal, 1 tsp haldi, salt. Pressure cook 3 whistles...") clears this
- * comfortably, while "Best butter chicken ever! Recipe below 👇" does not.
- *
- * Tuned to err toward *accepting*: wrongly rejecting a recipe the user can read
- * with their own eyes is far worse than one extra Gemini call, and the
- * `isRecipe` flag in the parser is the real backstop for junk that gets through.
- */
-const MIN_RECIPE_CAPTION_CHARS = 80;
-
-/** Whether a caption carries enough prose to be worth sending to the parser. */
-export function assessCaption(caption: string): CaptionVerdict {
-  if (caption.trim().length === 0) return 'no-caption';
-  return captionProse(caption).length < MIN_RECIPE_CAPTION_CHARS ? 'no-recipe-text' : 'ok';
-}
-
-/**
  * Creates an Instagram scraper backed by the Apify actor run-sync API.
  * `fetchImpl` is injectable so the scraper can be unit-tested without network.
+ *
+ * A caption too thin to hold a recipe (`assessCaption`) only rejects the post
+ * outright when there's no video to fall back on - see extract.ts's Level 3.
+ * Detecting that here, rather than letting Gemini improvise, matters because a
+ * successful parse is cached for a year under the post's shortcode and served
+ * to *everyone* who pastes that Reel: a caption of pure hashtags used to yield
+ * a plausible invented recipe that then became the permanent answer for that
+ * post.
  */
 export function createApifyInstagramScraper(
   config: Pick<Config, 'apifyToken' | 'apifyInstagramActor'>,
