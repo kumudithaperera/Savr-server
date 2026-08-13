@@ -25,6 +25,37 @@ export interface Config {
   geminiApiKey: string;
   geminiModel: string;
   /**
+   * Gemini model to use for video-understanding fallback. Uses Gemini 2.5 Flash
+   * by default as it has strong multimodal capabilities at reasonable cost.
+   * Set to empty string to disable video fallback entirely.
+   */
+  geminiVideoModel: string;
+  /**
+   * Whether to enable video fallback for recipe extraction. When enabled, if
+   * primary text extraction produces insufficient results and a video URL is
+   * available, the video will be analyzed using Gemini's multimodal capabilities.
+   * This incurs additional Gemini costs but can recover recipes from video-only
+   * content. Default: true
+   */
+  videoFallbackEnabled: boolean;
+  /**
+   * DeepSeek API key for low-cost text-based recipe extraction. DeepSeek is
+   * used as an intermediate layer between primary extraction and Gemini video
+   * fallback to reduce overall AI costs. Empty disables DeepSeek entirely,
+   * falling through directly to Gemini video when primary extraction fails.
+   */
+  deepseekApiKey: string;
+  /**
+   * DeepSeek model to use for text-based recipe analysis. Configurable so the
+   * model can be changed without code modifications.
+   */
+  deepseekModel: string;
+  /**
+   * DeepSeek API base URL. Defaults to the official API endpoint but can be
+   * overridden for testing or alternative endpoints.
+   */
+  deepseekBaseUrl: string;
+  /**
    * Pexels key for recipe photo backfill (`/image-search`). Optional: empty just
    * disables backfill, and recipes save without a photo. Lives here rather than
    * in the app because `EXPO_PUBLIC_*` vars are inlined into the JS bundle and
@@ -38,6 +69,13 @@ export interface Config {
    * for the same reason as `pexelsApiKey`.
    */
   usdaApiKey: string;
+  /**
+   * Contact address sent in the User-Agent of Open Food Facts read calls. OFF's
+   * API requires the `AppName/Version (ContactEmail)` form - without an email
+   * a crawler-heuristic ban is a real risk. Optional but strongly recommended
+   * in production; lives here, never in the app bundle.
+   */
+  offContactEmail: string;
   port: number;
   /**
    * Shared secret the app sends as `x-morsel-app-key`. When set, the backend
@@ -201,8 +239,14 @@ export function loadConfig(): Config {
     apifyTiktokNativeSubtitlesOnly: process.env.APIFY_TIKTOK_NATIVE_SUBTITLES_ONLY !== 'false',
     geminiApiKey: required('GEMINI_API_KEY'),
     geminiModel: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+    geminiVideoModel: process.env.GEMINI_VIDEO_MODEL ?? 'gemini-2.5-flash',
+    videoFallbackEnabled: process.env.VIDEO_FALLBACK_ENABLED !== 'false',
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? '',
+    deepseekModel: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat',
+    deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
     pexelsApiKey: process.env.PEXELS_API_KEY ?? '',
     usdaApiKey: process.env.USDA_API_KEY ?? '',
+    offContactEmail: process.env.OFF_CONTACT_EMAIL ?? '',
     port: Number(process.env.PORT ?? 3000),
     appSharedSecret: process.env.APP_SHARED_SECRET ?? '',
     upstashUrl: process.env.UPSTASH_REDIS_REST_URL ?? '',

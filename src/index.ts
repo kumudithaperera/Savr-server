@@ -3,10 +3,13 @@ import { loadConfig } from './config.js';
 import { createStore } from './lib/store.js';
 import { createSupabase } from './lib/supabase.js';
 import { createApifyInstagramScraper } from './services/apify.js';
+import { createDeepSeekRecipeParser } from './services/deepseek.js';
 import { createGeminiRecipeParser } from './services/gemini.js';
+import { createGeminiVideoParser } from './services/gemini-video.js';
 import { createPexelsPhotoSearch } from './services/images.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
-import { createUsdaNutritionLookup } from './services/nutrition.js';
+import { createOpenFoodFactsLookup } from './services/openfoodfacts.js';
+import { createUsdaNutritionLookup, createBrandFirstNutritionLookup } from './services/nutrition.js';
 import { createApifyTikTokScraper } from './services/tiktok.js';
 import { createWebScraper } from './services/web.js';
 
@@ -19,9 +22,15 @@ const app = buildApp({
   tiktokScraper: createApifyTikTokScraper(config),
   webScraper: createWebScraper(),
   parser: createGeminiRecipeParser(config),
+  deepseekParser: config.deepseekApiKey ? createDeepSeekRecipeParser(config) : undefined,
+  videoParser: config.videoFallbackEnabled ? createGeminiVideoParser(config) : undefined,
+  videoFallbackEnabled: config.videoFallbackEnabled,
   improver: createGeminiRecipeImprover(config),
   photoSearch: createPexelsPhotoSearch(config),
-  nutrition: createUsdaNutritionLookup(config),
+  nutrition: createBrandFirstNutritionLookup({
+    usda: createUsdaNutritionLookup(config),
+    off: createOpenFoodFactsLookup({ contactEmail: config.offContactEmail }),
+  }),
   appSharedSecret: config.appSharedSecret,
   store,
   supabase: createSupabase(
@@ -56,6 +65,15 @@ if (!config.appSharedSecret) {
   );
 }
 
+if (!config.offContactEmail) {
+  app.log.warn(
+    'OFF_CONTACT_EMAIL is unset - Open Food Facts requests identify as ' +
+      "'Morsel/1.0 (no-contact-email)', which violates the API's required " +
+      '`AppName/Version (ContactEmail)` User-Agent form and risks a crawler ban. ' +
+      'Set it in any deployed environment.',
+  );
+}
+
 if (!config.upstashUrl) {
   app.log.warn(
     'UPSTASH_REDIS_REST_URL is unset - rate limits, quotas and the extraction cache are in-memory and reset on every restart.',
@@ -86,6 +104,31 @@ if (config.supabaseUrl && !config.revenueCatWebhookSecret) {
     'REVENUECAT_WEBHOOK_SECRET is unset - /webhooks/revenuecat rejects every delivery. This ' +
       'endpoint fails closed on purpose: it decides who has paid. Set it here and set the same ' +
       "value as the webhook's Authorization header in the RevenueCat dashboard.",
+  );
+}
+
+// Log three-level architecture configuration
+if (config.deepseekApiKey) {
+  app.log.info(
+    `Level 2 (DeepSeek) enabled using model: ${config.deepseekModel}. ` +
+      'DeepSeek will analyze text when Level 1 is insufficient.',
+  );
+} else {
+  app.log.info(
+    'Level 2 (DeepSeek) disabled (DEEPSEEK_API_KEY not set). ' +
+      'Extraction will fall through directly to Level 3 (Gemini video) when Level 1 fails.',
+  );
+}
+
+if (config.videoFallbackEnabled) {
+  app.log.info(
+    `Level 3 (Gemini video) enabled using model: ${config.geminiVideoModel}. ` +
+      'Videos will be analyzed when text extraction is insufficient.',
+  );
+} else {
+  app.log.info(
+    'Level 3 (Gemini video) disabled (VIDEO_FALLBACK_ENABLED=false). ' +
+      'Video-only content will not be recoverable.',
   );
 }
 

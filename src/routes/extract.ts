@@ -3,17 +3,21 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 
 import type { InstagramScraper } from '../services/apify.js';
+import type { DeepSeekRecipeParser, DeepSeekResult } from '../services/deepseek.js';
 import type { RecipeParser } from '../services/gemini.js';
+import type { VideoRecipeParser } from '../services/gemini-video.js';
 import type { TikTokScraper } from '../services/tiktok.js';
 import type { WebScraper } from '../services/web.js';
+import { assessCompleteness, shouldTriggerFallback } from '../lib/completeness.js';
 import { resolveEntitlement } from '../lib/entitlement.js';
-import { atCapacity, quotaExceeded } from '../lib/errors.js';
+import { HttpError, atCapacity, quotaExceeded, unprocessable } from '../lib/errors.js';
 import { deviceIdOf } from '../lib/grants.js';
+import { mergeRecipes } from '../lib/merge.js';
 import { normalizeRecipe } from '../lib/normalize.js';
 import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, dayKey, monthKey } from '../lib/period.js';
 import type { Store } from '../lib/store.js';
 import type { Supabase } from '../lib/supabase.js';
-import type { ExtractedRecipe } from '../lib/types.js';
+import type { ExtractedRecipe, ParsedRecipe, ScrapedPost } from '../lib/types.js';
 import {
   assertExtractableUrl,
   assertHttpUrl,
@@ -35,7 +39,14 @@ interface ExtractDeps {
   instagramScraper: InstagramScraper;
   tiktokScraper: TikTokScraper;
   webScraper: WebScraper;
+  /** Level 1: Primary text-based recipe parser (existing Gemini). */
   parser: RecipeParser;
+  /** Level 2: DeepSeek text parser for low-cost text analysis. */
+  deepseekParser?: DeepSeekRecipeParser;
+  /** Level 3: Video-understanding parser for multimodal fallback. */
+  videoParser?: VideoRecipeParser;
+  /** Whether video fallback is enabled. Default: true if videoParser is provided. */
+  videoFallbackEnabled?: boolean;
   store: Store;
   limits: ExtractLimits;
   /** Subscription lookup behind the cap; unconfigured = redeem codes only. */
@@ -91,10 +102,143 @@ const STATS_TTL_SECONDS = 60 * 24 * 60 * 60;
 export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
   `stats:${kind}:${monthKey(now)}`;
 
+/** Monthly video fallback counters for tracking usage and success rate. */
+export const fallbackStatsKey = (kind: 'triggered' | 'success' | 'failed', now: Date) =>
+  `stats:fallback:${kind}:${monthKey(now)}`;
+
+/** Monthly DeepSeek (Level 2) counters for tracking usage and success rate. */
+export const deepseekStatsKey = (kind: 'triggered' | 'success' | 'insufficient' | 'failed', now: Date) =>
+  `stats:deepseek:${kind}:${monthKey(now)}`;
+
+/**
+ * Level 2: Attempts DeepSeek text-based extraction when Level 1 is insufficient.
+ * Returns the result with sufficiency assessment, or null if DeepSeek is unavailable.
+ */
+async function tryDeepSeekExtraction(
+  deps: ExtractDeps,
+  scraped: ScrapedPost,
+  primaryParsed: ParsedRecipe | null,
+  request: { log: { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void } },
+  now: Date,
+  store: Store,
+): Promise<DeepSeekResult | null> {
+  if (!deps.deepseekParser) {
+    return null;
+  }
+
+  // Only call DeepSeek if there's meaningful text to analyze
+  if (!scraped.caption.trim()) {
+    request.log.info({}, 'DeepSeek skipped: no text available');
+    return null;
+  }
+
+  await store.incrWithTtl(deepseekStatsKey('triggered', now), STATS_TTL_SECONDS);
+  request.log.info({}, 'triggering DeepSeek text extraction (Level 2)');
+
+  try {
+    const result = await deps.deepseekParser.parseText(
+      scraped.caption,
+      primaryParsed ?? undefined,
+    );
+
+    if (result.recipe.isRecipe === false) {
+      request.log.info({}, 'DeepSeek: text does not contain a recipe');
+      await store.incrWithTtl(deepseekStatsKey('insufficient', now), STATS_TTL_SECONDS);
+      return result;
+    }
+
+    if (result.sufficient) {
+      await store.incrWithTtl(deepseekStatsKey('success', now), STATS_TTL_SECONDS);
+      request.log.info(
+        {
+          confidence: result.confidence,
+          ingredientCount: result.recipe.ingredients.length,
+          stepCount: result.recipe.steps.length,
+        },
+        'DeepSeek extraction sufficient',
+      );
+    } else {
+      await store.incrWithTtl(deepseekStatsKey('insufficient', now), STATS_TTL_SECONDS);
+      request.log.info(
+        {
+          confidence: result.confidence,
+          missing: result.missing,
+        },
+        'DeepSeek extraction insufficient, may need video fallback',
+      );
+    }
+
+    return result;
+  } catch (err) {
+    request.log.warn(
+      { error: (err as Error).message },
+      'DeepSeek extraction failed',
+    );
+    await store.incrWithTtl(deepseekStatsKey('failed', now), STATS_TTL_SECONDS);
+    return null;
+  }
+}
+
+/**
+ * Level 3: Attempts video fallback extraction when text-based extraction is insufficient.
+ * Returns null if video fallback is disabled, unavailable, or fails.
+ */
+async function tryVideoFallback(
+  deps: ExtractDeps,
+  scraped: ScrapedPost,
+  primaryParsed: ParsedRecipe | null,
+  request: { log: { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void } },
+  now: Date,
+  store: Store,
+): Promise<ParsedRecipe | null> {
+  const videoFallbackEnabled = deps.videoFallbackEnabled ?? Boolean(deps.videoParser);
+
+  if (!videoFallbackEnabled || !deps.videoParser) {
+    return null;
+  }
+
+  if (!scraped.videoUrl) {
+    request.log.info({ hasVideoUrl: false }, 'video fallback skipped: no video URL');
+    return null;
+  }
+
+  await store.incrWithTtl(fallbackStatsKey('triggered', now), STATS_TTL_SECONDS);
+  request.log.info({ videoUrl: scraped.videoUrl }, 'triggering video fallback extraction');
+
+  try {
+    const videoParsed = await deps.videoParser.parseVideo(
+      scraped.videoUrl,
+      scraped.caption,
+      primaryParsed ?? undefined,
+    );
+
+    if (videoParsed.isRecipe === false) {
+      request.log.info({}, 'video fallback: video analysis found no recipe');
+      await store.incrWithTtl(fallbackStatsKey('failed', now), STATS_TTL_SECONDS);
+      return null;
+    }
+
+    await store.incrWithTtl(fallbackStatsKey('success', now), STATS_TTL_SECONDS);
+    request.log.info(
+      { ingredientCount: videoParsed.ingredients.length, stepCount: videoParsed.steps.length },
+      'video fallback extraction succeeded',
+    );
+    return videoParsed;
+  } catch (err) {
+    request.log.warn(
+      { error: (err as Error).message },
+      'video fallback extraction failed',
+    );
+    await store.incrWithTtl(fallbackStatsKey('failed', now), STATS_TTL_SECONDS);
+    return null;
+  }
+}
+
 /**
  * Registers `POST /extract`. The pipeline: validate URL -> serve from cache if
  * we've seen this link -> meter (global circuit breaker, then per-device monthly
  * quota) for Instagram/TikTok only -> pick the scraper -> parse + estimate macros
+ * -> check completeness -> optionally trigger video fallback -> merge results
  * -> normalize -> cache -> return ExtractedRecipe. Error mapping is handled
  * centrally.
  */
@@ -165,8 +309,123 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     }
 
     const scraped = await scraperFor(platform, deps).scrape(url);
-    const parsed = await deps.parser.parse(scraped.caption);
-    const recipe = normalizeRecipe(url, platform, scraped, parsed);
+
+    // =========================================================================
+    // THREE-LEVEL EXTRACTION ARCHITECTURE
+    // Level 1: Primary text extraction (existing Gemini text parser)
+    // Level 2: DeepSeek text analysis (cheap, if Level 1 insufficient)
+    // Level 3: Gemini video fallback (expensive, if Level 2 insufficient)
+    // =========================================================================
+
+    // LEVEL 1: Primary text-based extraction
+    let primaryParsed: ParsedRecipe | null = null;
+    let primaryError: Error | null = null;
+
+    if (scraped.caption.trim()) {
+      try {
+        primaryParsed = await deps.parser.parse(scraped.caption);
+      } catch (err) {
+        primaryError = err as Error;
+        request.log.info(
+          { error: primaryError.message },
+          'Level 1 extraction failed',
+        );
+      }
+    } else {
+      request.log.info({}, 'Level 1: no caption available');
+    }
+
+    // Check if Level 1 result is sufficient
+    let level1Sufficient = false;
+    if (primaryParsed && primaryParsed.isRecipe !== false) {
+      const completeness = assessCompleteness(scraped, primaryParsed);
+      level1Sufficient = completeness.isComplete && completeness.confidence >= 0.6;
+      if (level1Sufficient) {
+        request.log.info(
+          {
+            confidence: completeness.confidence,
+            ingredientCount: completeness.details.ingredientCount,
+            stepCount: completeness.details.stepCount,
+          },
+          'Level 1 extraction sufficient - stopping',
+        );
+      }
+    }
+
+    // If Level 1 is sufficient, use it directly
+    let finalParsed: ParsedRecipe;
+
+    if (level1Sufficient && primaryParsed) {
+      finalParsed = primaryParsed;
+    } else {
+      // LEVEL 2: DeepSeek text analysis (if text is available)
+      let deepseekResult: DeepSeekResult | null = null;
+
+      if (scraped.caption.trim()) {
+        deepseekResult = await tryDeepSeekExtraction(
+          deps, scraped, primaryParsed, request, now, store,
+        );
+      }
+
+      // Check if DeepSeek result is sufficient
+      if (deepseekResult?.sufficient && deepseekResult.recipe.isRecipe !== false) {
+        request.log.info(
+          { confidence: deepseekResult.confidence },
+          'Level 2 (DeepSeek) extraction sufficient - stopping',
+        );
+        finalParsed = deepseekResult.recipe;
+      } else {
+        // LEVEL 3: Gemini video fallback (if video URL available)
+        const needsVideo = !deepseekResult?.sufficient && scraped.videoUrl;
+        let videoParsed: ParsedRecipe | null = null;
+
+        if (needsVideo) {
+          const bestTextResult = deepseekResult?.recipe ?? primaryParsed;
+          request.log.info(
+            { reason: deepseekResult ? 'deepseek_insufficient' : 'no_text_result' },
+            'proceeding to Level 3 (Gemini video)',
+          );
+          videoParsed = await tryVideoFallback(deps, scraped, bestTextResult, request, now, store);
+        }
+
+        // Determine final result from all levels
+        if (videoParsed && videoParsed.isRecipe !== false) {
+          // Merge video result with best text result if both available
+          const bestTextResult = deepseekResult?.recipe ?? primaryParsed;
+          if (bestTextResult && bestTextResult.isRecipe !== false) {
+            const merged = mergeRecipes(bestTextResult, videoParsed);
+            request.log.info(
+              {
+                videoContributions: merged.videoContributions,
+                mergedConfidence: merged.mergedConfidence,
+              },
+              'merged text and video extraction results',
+            );
+            finalParsed = merged;
+          } else {
+            finalParsed = videoParsed;
+          }
+        } else if (deepseekResult?.recipe && deepseekResult.recipe.isRecipe !== false) {
+          // DeepSeek had something even if not "sufficient"
+          finalParsed = deepseekResult.recipe;
+        } else if (primaryParsed && primaryParsed.isRecipe !== false) {
+          // Fall back to primary result
+          finalParsed = primaryParsed;
+        } else {
+          // No usable result from any level
+          if (primaryError) {
+            throw primaryError;
+          }
+          throw unprocessable(
+            'Could not extract a recipe from this link. The video may not contain a recipe, ' +
+            'or the content could not be analyzed.',
+            'not_a_recipe',
+          );
+        }
+      }
+    }
+
+    const recipe = normalizeRecipe(url, platform, scraped, finalParsed);
 
     // INVARIANT: only a confidently-parsed recipe is ever cached. Every rejection
     // upstream of here throws - the link check, the caption gate in the scraper,

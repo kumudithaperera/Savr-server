@@ -45,6 +45,31 @@ export interface ScrapedPost {
   imageUrl?: string;
   ownerUsername?: string;
   shortcode?: string;
+  /** Direct video URL when available, for video-understanding fallback. */
+  videoUrl?: string;
+}
+
+/** Why the video fallback was triggered. */
+export type FallbackReason =
+  | 'no_caption'
+  | 'insufficient_caption'
+  | 'no_ingredients'
+  | 'few_ingredients'
+  | 'missing_quantities'
+  | 'no_steps'
+  | 'not_a_recipe'
+  | 'low_confidence';
+
+/** Confidence metadata for an extraction result. */
+export interface ExtractionConfidence {
+  /** Overall confidence score 0-1. */
+  score: number;
+  /** Source of this extraction (primary text parser or video fallback). */
+  source: 'primary' | 'video_fallback' | 'merged';
+  /** Whether video fallback was triggered. */
+  fallbackTriggered: boolean;
+  /** Reason fallback was triggered, if applicable. */
+  fallbackReason?: FallbackReason;
 }
 
 /** Structured result returned by the LLM parsing step. */

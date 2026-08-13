@@ -29,6 +29,8 @@ interface ApifyTikTokItem {
   videoMeta?: {
     coverUrl?: string;
     subtitleLinks?: ApifySubtitleLink[];
+    /** Direct download URL for the video file. */
+    downloadAddr?: string;
   };
   authorMeta?: { name?: string };
   id?: string;
@@ -148,7 +150,12 @@ export function createApifyTikTokScraper(
       if (transcript) parts.push(`Video transcript:\n${transcript}`);
       const combined = parts.join('\n\n').trim();
 
-      if (!combined) {
+      // Extract video URL for potential video-understanding fallback.
+      const videoUrl = item.videoMeta?.downloadAddr ?? item.webVideoUrl ?? undefined;
+
+      // Only reject if there's no text AND no video URL to fall back on.
+      // When video URL is available, the video fallback can still analyze it.
+      if (!combined && !videoUrl) {
         throw unprocessable(
           'This TikTok has no caption or subtitles to extract a recipe from.',
         );
@@ -159,6 +166,7 @@ export function createApifyTikTokScraper(
         imageUrl: item.videoMeta?.coverUrl,
         ownerUsername: item.authorMeta?.name,
         shortcode: item.id,
+        videoUrl,
       };
     },
   };

@@ -8,6 +8,10 @@ interface ApifyInstagramItem {
   displayUrl?: string;
   ownerUsername?: string;
   shortCode?: string;
+  /** Video URL for Reels and video posts. */
+  videoUrl?: string;
+  /** Whether this is a video post. */
+  isVideo?: boolean;
   // Apify returns an `error` field on items it could not scrape.
   error?: string;
 }
@@ -105,8 +109,13 @@ export function createApifyInstagramScraper(
       }
 
       const caption = (item.caption ?? '').trim();
+      const videoUrl = item.videoUrl ?? undefined;
       const verdict = assessCaption(caption);
-      if (verdict === 'no-caption') {
+
+      // When video URL is available, allow posts with insufficient captions to
+      // proceed - the video fallback can analyze the video content. Only reject
+      // when there is no video to fall back on.
+      if (verdict === 'no-caption' && !videoUrl) {
         throw unprocessable(
           "This Reel's recipe is in the video, and Morsel can only read recipes " +
             'written out in the caption right now. Try a post with the ingredients ' +
@@ -114,7 +123,7 @@ export function createApifyInstagramScraper(
           'caption_only',
         );
       }
-      if (verdict === 'no-recipe-text') {
+      if (verdict === 'no-recipe-text' && !videoUrl) {
         throw unprocessable(
           "This post's caption is just hashtags and a description, not a recipe. " +
             'Morsel reads Instagram recipes from the caption, so try a post with ' +
@@ -128,6 +137,7 @@ export function createApifyInstagramScraper(
         imageUrl: item.displayUrl,
         ownerUsername: item.ownerUsername,
         shortcode: item.shortCode,
+        videoUrl,
       };
     },
   };

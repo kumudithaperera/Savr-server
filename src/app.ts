@@ -1,7 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { InstagramScraper } from './services/apify.js';
+import type { DeepSeekRecipeParser } from './services/deepseek.js';
 import type { RecipeParser } from './services/gemini.js';
+import type { VideoRecipeParser } from './services/gemini-video.js';
 import type { PhotoSearch } from './services/images.js';
 import type { RecipeImprover } from './services/improve.js';
 import type { NutritionLookup } from './services/nutrition.js';
@@ -11,7 +13,7 @@ import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
 import { createSupabase, type Supabase } from './lib/supabase.js';
-import { registerExtractRoute, statsKey, type ExtractLimits } from './routes/extract.js';
+import { registerExtractRoute, statsKey, fallbackStatsKey, deepseekStatsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
 import { registerNutritionRoute } from './routes/nutrition.js';
@@ -36,7 +38,14 @@ export interface AppDeps {
   instagramScraper: InstagramScraper;
   tiktokScraper: TikTokScraper;
   webScraper: WebScraper;
+  /** Level 1: Primary text-based recipe parser. */
   parser: RecipeParser;
+  /** Level 2: DeepSeek text parser for low-cost text analysis. */
+  deepseekParser?: DeepSeekRecipeParser;
+  /** Level 3: Video-understanding recipe parser for multimodal fallback. */
+  videoParser?: VideoRecipeParser;
+  /** Whether video fallback is enabled. Default: true if videoParser is provided. */
+  videoFallbackEnabled?: boolean;
   improver: RecipeImprover;
   /** Backs `/image-search`, holding the Pexels key the app used to ship. */
   photoSearch: PhotoSearch;
@@ -103,13 +112,34 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // how far $5 stretches: every hit is an extraction nobody paid for.
   app.get('/health', async () => {
     const now = new Date();
-    const [hits, misses] = await Promise.all([
+    const [
+      hits, misses,
+      dsTriggered, dsSuccess, dsInsufficient, dsFailed,
+      fbTriggered, fbSuccess, fbFailed,
+    ] = await Promise.all([
       store.getJson<number>(statsKey('hit', now)),
       store.getJson<number>(statsKey('miss', now)),
+      store.getJson<number>(deepseekStatsKey('triggered', now)),
+      store.getJson<number>(deepseekStatsKey('success', now)),
+      store.getJson<number>(deepseekStatsKey('insufficient', now)),
+      store.getJson<number>(deepseekStatsKey('failed', now)),
+      store.getJson<number>(fallbackStatsKey('triggered', now)),
+      store.getJson<number>(fallbackStatsKey('success', now)),
+      store.getJson<number>(fallbackStatsKey('failed', now)),
     ]);
     const hit = hits ?? 0;
     const miss = misses ?? 0;
     const total = hit + miss;
+
+    const deepseekTriggered = dsTriggered ?? 0;
+    const deepseekSuccess = dsSuccess ?? 0;
+    const deepseekInsufficient = dsInsufficient ?? 0;
+    const deepseekFailed = dsFailed ?? 0;
+
+    const videoTriggered = fbTriggered ?? 0;
+    const videoSuccess = fbSuccess ?? 0;
+    const videoFailed = fbFailed ?? 0;
+
     return {
       status: 'ok',
       store: store.kind,
@@ -118,6 +148,21 @@ export function buildApp(deps: AppDeps): FastifyInstance {
         hits: hit,
         misses: miss,
         hitRate: total === 0 ? null : Math.round((hit / total) * 100) / 100,
+      },
+      deepseek: {
+        enabled: Boolean(deps.deepseekParser),
+        triggered: deepseekTriggered,
+        success: deepseekSuccess,
+        insufficient: deepseekInsufficient,
+        failed: deepseekFailed,
+        successRate: deepseekTriggered === 0 ? null : Math.round((deepseekSuccess / deepseekTriggered) * 100) / 100,
+      },
+      videoFallback: {
+        enabled: deps.videoFallbackEnabled ?? Boolean(deps.videoParser),
+        triggered: videoTriggered,
+        success: videoSuccess,
+        failed: videoFailed,
+        successRate: videoTriggered === 0 ? null : Math.round((videoSuccess / videoTriggered) * 100) / 100,
       },
     };
   });
