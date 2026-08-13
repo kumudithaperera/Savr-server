@@ -114,6 +114,40 @@ interface GeminiFileUploadResponse {
   error?: { message?: string; code?: number };
 }
 
+const RETRY_DELAY_MS = 1500;
+
+/**
+ * POSTs to Gemini's generateContent, retrying once on a 503. Gemini's own
+ * error body calls this "high demand... usually temporary" - worth one retry
+ * before falling back to whatever text result the earlier levels already
+ * produced. Network failures and every other status pass straight through
+ * without retrying.
+ */
+async function generateContentWithRetry(
+  endpoint: string,
+  body: string,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+    } catch (err) {
+      throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
+    }
+
+    if (response.status !== 503 || attempt >= 2) {
+      return response;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+  }
+}
+
 /**
  * Downloads video from URL and returns as base64 with mime type.
  */
@@ -257,32 +291,27 @@ export function createGeminiVideoParser(
         `https://generativelanguage.googleapis.com/v1beta/models/` +
         `${config.geminiVideoModel}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`;
 
-      let response: Response;
-      try {
-        response = await fetchImpl(endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: VIDEO_SYSTEM_PROMPT }] },
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  videoPart,
-                  { text: userPrompt },
-                ],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              responseSchema: RESPONSE_SCHEMA,
-              temperature: 0.2,
+      const response = await generateContentWithRetry(
+        endpoint,
+        JSON.stringify({
+          systemInstruction: { parts: [{ text: VIDEO_SYSTEM_PROMPT }] },
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                videoPart,
+                { text: userPrompt },
+              ],
             },
-          }),
-        });
-      } catch (err) {
-        throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
-      }
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+            temperature: 0.2,
+          },
+        }),
+        fetchImpl,
+      );
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '');
