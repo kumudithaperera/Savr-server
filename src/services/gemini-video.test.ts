@@ -37,6 +37,19 @@ function geminiResponse(status: number, recipe: ParsedRecipe = RECIPE): Response
   } as unknown as Response;
 }
 
+/** Like `geminiResponse`, but injects an arbitrary JSON text payload. */
+function geminiResponseText(status: number, text: string): Response {
+  const ok = status >= 200 && status < 300;
+  return {
+    ok,
+    status,
+    text: async () => (ok ? '' : 'high demand'),
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text }] } }],
+    }),
+  } as unknown as Response;
+}
+
 /** Routes the video-download GET separately from Gemini's generateContent POST. */
 function makeFetch(generateContentResponses: Response[]): typeof fetch {
   const queue = [...generateContentResponses];
@@ -84,5 +97,41 @@ describe('createGeminiVideoParser', () => {
 
     await expect(parser.parseVideo(VIDEO_URL)).rejects.toThrow(/500/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects Gemini video output that is valid JSON but the wrong shape', async () => {
+    const fetchImpl = makeFetch([
+      geminiResponseText(200, JSON.stringify({ title: 42 })),
+    ]);
+    const parser = createGeminiVideoParser(CONFIG, fetchImpl);
+
+    await expect(parser.parseVideo(VIDEO_URL)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'parse_failed',
+      message: 'Gemini returned a malformed recipe response from video analysis.',
+    });
+  });
+
+  it('accepts a non-recipe verdict from Gemini video analysis', async () => {
+    const fetchImpl = makeFetch([
+      geminiResponseText(
+        200,
+        JSON.stringify({
+          isRecipe: false,
+          title: '',
+          servings: 1,
+          ingredients: [],
+          steps: [],
+          macros: { calories: 0, carbs: 0, protein: 0, fat: 0 },
+          macrosStatedInCaption: false,
+          suggestedCategory: 'meals',
+        }),
+      ),
+    ]);
+    const parser = createGeminiVideoParser(CONFIG, fetchImpl);
+
+    const result = await parser.parseVideo(VIDEO_URL);
+    expect(result.isRecipe).toBe(false);
+    expect(result.title).toBe('');
   });
 });

@@ -18,6 +18,7 @@ import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, dayKey, monthKey } from '../lib/per
 import type { Store } from '../lib/store.js';
 import type { Supabase } from '../lib/supabase.js';
 import type { ExtractedRecipe, ParsedRecipe, ScrapedPost } from '../lib/types.js';
+import { validateExtractedRecipe } from '../lib/validate.js';
 import {
   assertExtractableUrl,
   assertHttpUrl,
@@ -460,6 +461,19 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     // this line. That matters because an entry written here is keyed on the post,
     // lives for a year, and is then served to everyone who pastes that link: one
     // cached guess becomes the permanent answer for that post.
+    //
+    // Defensive shape check on the wire format. normalizeRecipe sanitises and
+    // defaults every field, so this should never fail; if it does, the recipe is
+    // rejected rather than cached and served as-is.
+    const validated = validateExtractedRecipe(recipe);
+    if (!validated.success) {
+      request.log.error(
+        { url, errors: validated.errors },
+        'normalization produced an invalid ExtractedRecipe',
+      );
+      throw new HttpError(500, 'internal_error', 'Something went wrong.');
+    }
+
     await store.setJson(cacheKey(canonical), recipe, cacheTtlSeconds);
 
     // A short link (vm.tiktok.com/…) can't be canonicalised before scraping,

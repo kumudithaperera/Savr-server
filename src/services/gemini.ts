@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
+import { generateContentWithRetry } from '../lib/geminiFetch.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
+import { validateParsedRecipe } from '../lib/validate.js';
 
 export interface RecipeParser {
   parse(caption: string): Promise<ParsedRecipe>;
@@ -81,24 +83,17 @@ export function createGeminiRecipeParser(
         `https://generativelanguage.googleapis.com/v1beta/models/` +
         `${config.geminiModel}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`;
 
-      let response: Response;
-      try {
-        response = await fetchImpl(endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents: [{ role: 'user', parts: [{ text: caption }] }],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              responseSchema: RESPONSE_SCHEMA,
-              temperature: 0.2,
-            },
-          }),
-        });
-      } catch (err) {
-        throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
-      }
+      const body = JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: 'user', parts: [{ text: caption }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0.2,
+        },
+      });
+
+      const response = await generateContentWithRetry(endpoint, body, fetchImpl);
 
       if (!response.ok) {
         throw upstreamError(`Gemini returned HTTP ${response.status}.`);
@@ -110,11 +105,18 @@ export function createGeminiRecipeParser(
         throw unprocessable('Gemini returned no recipe content.');
       }
 
+      let parsed: ParsedRecipe;
       try {
-        return JSON.parse(text) as ParsedRecipe;
+        parsed = JSON.parse(text) as ParsedRecipe;
       } catch {
         throw unprocessable('Gemini returned malformed recipe JSON.');
       }
+
+      const validated = validateParsedRecipe(parsed);
+      if (!validated.success) {
+        throw unprocessable('Gemini returned a malformed recipe response.');
+      }
+      return validated.data;
     },
   };
 }

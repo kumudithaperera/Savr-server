@@ -8,7 +8,7 @@ import { createGeminiRecipeParser } from './services/gemini.js';
 import { createGeminiVideoParser } from './services/gemini-video.js';
 import { createPexelsPhotoSearch } from './services/images.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
-import { createBrandFirstNutritionLookup, createUsdaNutritionLookup } from './services/nutrition.js';
+import { createBrandFirstNutritionLookup, createUsdaNutritionLookup, createDeepSeekNutritionLookup } from './services/nutrition.js';
 import { createOpenFoodFactsLookup } from './services/openfoodfacts.js';
 import { createApifyTikTokScraper } from './services/tiktok.js';
 import { createWebScraper } from './services/web.js';
@@ -30,6 +30,7 @@ const app = buildApp({
   nutrition: createBrandFirstNutritionLookup({
     usda: createUsdaNutritionLookup(config),
     off: createOpenFoodFactsLookup({ contactEmail: config.offContactEmail }),
+    deepseek: config.deepseekApiKey ? createDeepSeekNutritionLookup(config) : undefined,
   }),
   appSharedSecret: config.appSharedSecret,
   store,

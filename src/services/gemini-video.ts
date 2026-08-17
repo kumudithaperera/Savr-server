@@ -11,7 +11,9 @@
 
 import type { Config } from '../config.js';
 import { upstreamError, unprocessable } from '../lib/errors.js';
+import { generateContentWithRetry } from '../lib/geminiFetch.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
+import { validateParsedRecipe } from '../lib/validate.js';
 
 export interface VideoRecipeParser {
   /**
@@ -112,40 +114,6 @@ interface GeminiFileUploadResponse {
     state?: string;
   };
   error?: { message?: string; code?: number };
-}
-
-const RETRY_DELAY_MS = 1500;
-
-/**
- * POSTs to Gemini's generateContent, retrying once on a 503. Gemini's own
- * error body calls this "high demand... usually temporary" - worth one retry
- * before falling back to whatever text result the earlier levels already
- * produced. Network failures and every other status pass straight through
- * without retrying.
- */
-async function generateContentWithRetry(
-  endpoint: string,
-  body: string,
-  fetchImpl: typeof fetch,
-): Promise<Response> {
-  for (let attempt = 1; ; attempt++) {
-    let response: Response;
-    try {
-      response = await fetchImpl(endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body,
-      });
-    } catch (err) {
-      throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
-    }
-
-    if (response.status !== 503 || attempt >= 2) {
-      return response;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-  }
 }
 
 /**
@@ -329,11 +297,18 @@ export function createGeminiVideoParser(
         throw unprocessable('Gemini video analysis returned no recipe content.');
       }
 
+      let parsed: ParsedRecipe;
       try {
-        return JSON.parse(text) as ParsedRecipe;
+        parsed = JSON.parse(text) as ParsedRecipe;
       } catch {
         throw unprocessable('Gemini returned malformed recipe JSON from video analysis.');
       }
+
+      const validated = validateParsedRecipe(parsed);
+      if (!validated.success) {
+        throw unprocessable('Gemini returned a malformed recipe response from video analysis.');
+      }
+      return validated.data;
     },
   };
 }

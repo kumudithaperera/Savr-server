@@ -195,9 +195,155 @@ export function createUsdaNutritionLookup(deps: { usdaApiKey: string }): Nutriti
 }
 
 /**
+ * DeepSeek nutrition lookup that estimates macros + micros per 100 g for a
+ * given food using the DeepSeek chat API. Used as a fallback when USDA is
+ * unavailable (rate limited, down, etc.).
+ *
+ * DeepSeek has broad food-knowledge from training data and can produce
+ * reasonable estimates for common ingredients. The estimates are not as
+ * authoritative as USDA reference data, but they are far better than leaving
+ * an ingredient unmatched.
+ */
+export function createDeepSeekNutritionLookup(deps: {
+  deepseekApiKey: string;
+  deepseekModel: string;
+  deepseekBaseUrl: string;
+}, fetchImpl: typeof fetch = fetch): NutritionLookup {
+  return {
+    async search(query: string): Promise<FoodNutrition | null> {
+      const clean = sanitizeQuery(query);
+      if (!clean) return null;
+
+      const endpoint = `${deps.deepseekBaseUrl}/v1/chat/completions`;
+
+      const systemPrompt = `You are a food nutrition specialist. Given a food name, return the estimated nutrition values per 100g.
+
+Return JSON only, matching the exact schema provided.
+
+RULES:
+1. Estimate realistic nutrition values per 100g for the given food.
+2. Use standard food composition data (USDA, food databases) as reference.
+3. For generic foods like "chicken breast", "olive oil", "apple", use widely accepted values.
+4. For branded foods, estimate based on the typical product profile.
+5. If the food is a prepared dish, estimate based on typical ingredients.
+6. All values are per 100 grams.
+7. Be precise - use reasonable decimal places.
+8. If you genuinely cannot estimate, return zeros but still attempt a reasonable guess.`;
+
+      const responseSchema = {
+        type: 'object',
+        properties: {
+          caloriesPer100g: { type: 'number' },
+          proteinPer100g: { type: 'number' },
+          carbsPer100g: { type: 'number' },
+          fatPer100g: { type: 'number' },
+          fiberG: { type: 'number' },
+          sugarsG: { type: 'number' },
+          sodiumMg: { type: 'number' },
+          potassiumMg: { type: 'number' },
+          calciumMg: { type: 'number' },
+          ironMg: { type: 'number' },
+          magnesiumMg: { type: 'number' },
+          zincMg: { type: 'number' },
+          saturatedFatG: { type: 'number' },
+          monounsaturatedFatG: { type: 'number' },
+          polyunsaturatedFatG: { type: 'number' },
+          cholesterolMg: { type: 'number' },
+          vitaminCMg: { type: 'number' },
+          vitaminARaeUg: { type: 'number' },
+          vitaminDUg: { type: 'number' },
+        },
+        required: [
+          'caloriesPer100g', 'proteinPer100g', 'carbsPer100g', 'fatPer100g',
+          'fiberG', 'sugarsG', 'sodiumMg', 'potassiumMg', 'calciumMg', 'ironMg',
+          'magnesiumMg', 'zincMg', 'saturatedFatG', 'monounsaturatedFatG',
+          'polyunsaturatedFatG', 'cholesterolMg', 'vitaminCMg', 'vitaminARaeUg',
+          'vitaminDUg',
+        ],
+      };
+
+      let response: Response;
+      try {
+        response = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${deps.deepseekApiKey}`,
+          },
+          body: JSON.stringify({
+            model: deps.deepseekModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `What is the nutrition per 100g for: ${clean}` },
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+          }),
+        });
+      } catch {
+        throw upstreamError('Could not reach DeepSeek for nutrition estimate.');
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw upstreamError(`DeepSeek nutrition returned HTTP ${response.status}: ${errorText}`);
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        error?: { message?: string; type?: string };
+      };
+
+      if (data.error) {
+        throw upstreamError(`DeepSeek nutrition error: ${data.error.message ?? data.error.type ?? 'Unknown'}`);
+      }
+
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) {
+        return null;
+      }
+
+      let parsed: Record<string, number>;
+      try {
+        parsed = JSON.parse(content) as Record<string, number>;
+      } catch {
+        return null;
+      }
+
+      return {
+        macros: {
+          caloriesPer100g: parsed.caloriesPer100g ?? 0,
+          proteinPer100g: parsed.proteinPer100g ?? 0,
+          carbsPer100g: parsed.carbsPer100g ?? 0,
+          fatPer100g: parsed.fatPer100g ?? 0,
+        },
+        micros: {
+          fiberG: parsed.fiberG ?? 0,
+          sugarsG: parsed.sugarsG ?? 0,
+          sodiumMg: parsed.sodiumMg ?? 0,
+          potassiumMg: parsed.potassiumMg ?? 0,
+          calciumMg: parsed.calciumMg ?? 0,
+          ironMg: parsed.ironMg ?? 0,
+          magnesiumMg: parsed.magnesiumMg ?? 0,
+          zincMg: parsed.zincMg ?? 0,
+          saturatedFatG: parsed.saturatedFatG ?? 0,
+          monounsaturatedFatG: parsed.monounsaturatedFatG ?? 0,
+          polyunsaturatedFatG: parsed.polyunsaturatedFatG ?? 0,
+          cholesterolMg: parsed.cholesterolMg ?? 0,
+          vitaminCMg: parsed.vitaminCMg ?? 0,
+          vitaminARaeUg: parsed.vitaminARaeUg ?? 0,
+          vitaminDUg: parsed.vitaminDUg ?? 0,
+        },
+      };
+    },
+  };
+}
+
+/**
  * Combines the two nutrition sources behind the `/nutrition` route: Open Food
  * Facts first only when the ingredient text names a specific branded product,
- * with USDA FoodData Central as the generic fallback.
+ * with USDA FoodData Central as the generic fallback, and DeepSeek AI as a
+ * last-resort fallback when USDA is unavailable (rate-limited, down, etc.).
  *
  * Flow for a query like "200g barilla spaghetti":
  *
@@ -209,14 +355,19 @@ export function createUsdaNutritionLookup(deps: { usdaApiKey: string }): Nutriti
  *  3. OFF returning null (no brand-confirmed product) or failing to reach its
  *     API falls through to USDA's generic value - the exact behavior the app
  *     had before this source existed, never a broken check or a wrong answer.
+ *  4. If USDA throws (429 rate limit, 401/403, network error), DeepSeek AI
+ *     estimates the nutrition as a failsafe. Only when all three sources fail
+ *     does the check return null.
  *
  * This is OFF as an *accuracy* boost for named products, not a replacement for
  * USDA: branded items get real label values, everything else stays on the
- * reference database the app was built around.
+ * reference database the app was built around. DeepSeek is the final safety
+ * net, not a primary source.
  */
 export function createBrandFirstNutritionLookup(deps: {
   usda: NutritionLookup;
   off: OffLookup;
+  deepseek?: NutritionLookup;
 }): NutritionLookup {
   return {
     async search(query: string): Promise<FoodNutrition | null> {
@@ -224,7 +375,13 @@ export function createBrandFirstNutritionLookup(deps: {
       if (!clean) return deps.usda.search(query);
 
       const brands = brandTokens(clean);
-      if (brands.length === 0) return deps.usda.search(query);
+      if (brands.length === 0) {
+        try {
+          return await deps.usda.search(query);
+        } catch {
+          return deps.deepseek?.search(query) ?? null;
+        }
+      }
 
       let branded: FoodNutrition | null = null;
       try {
@@ -233,7 +390,12 @@ export function createBrandFirstNutritionLookup(deps: {
         // OFF down doesn't fail the check - fall through to USDA below.
       }
       if (branded) return branded;
-      return deps.usda.search(query);
+
+      try {
+        return await deps.usda.search(query);
+      } catch {
+        return deps.deepseek?.search(query) ?? null;
+      }
     },
   };
 }

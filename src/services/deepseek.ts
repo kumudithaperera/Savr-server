@@ -14,6 +14,7 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
+import { validateParsedRecipe } from '../lib/validate.js';
 
 export interface DeepSeekRecipeParser {
   /**
@@ -223,17 +224,13 @@ export function createDeepSeekRecipeParser(
         throw unprocessable('DeepSeek returned malformed recipe JSON.');
       }
 
+      const validated = validateParsedRecipe(parsed);
+      if (!validated.success) {
+        throw unprocessable('DeepSeek returned a malformed recipe response.');
+      }
+
       // Extract recipe portion and metadata separately
-      const recipe: ParsedRecipe = {
-        isRecipe: parsed.isRecipe,
-        title: parsed.title,
-        servings: parsed.servings,
-        ingredients: parsed.ingredients ?? [],
-        steps: parsed.steps ?? [],
-        macros: parsed.macros ?? { calories: 0, carbs: 0, protein: 0, fat: 0 },
-        macrosStatedInCaption: parsed.macrosStatedInCaption ?? false,
-        suggestedCategory: parsed.suggestedCategory ?? 'meals',
-      };
+      const recipe: ParsedRecipe = validated.data;
 
       return {
         recipe,

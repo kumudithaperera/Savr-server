@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from '../app.js';
 import type { DeepSeekResult } from '../services/deepseek.js';
+import { createStore } from '../lib/store.js';
 import type { ScrapedPost, ParsedRecipe } from '../lib/types.js';
 
 /**
@@ -145,6 +146,43 @@ describe('extraction level ordering', () => {
     expect(res.statusCode).toBe(200);
     expect(deepseekParser.parseText).toHaveBeenCalledOnce();
     expect(deps.parser.parse).toHaveBeenCalledOnce();
+    await app.close();
+  });
+});
+
+describe('extraction cache boundary', () => {
+  it('rejects an invalid ExtractedRecipe at the cache boundary with a 500', async () => {
+    const store = createStore({ upstashUrl: '', upstashToken: '' });
+    const setJsonSpy = vi.spyOn(store, 'setJson');
+
+    // imageRemoteUrl comes from scraped.imageUrl unsanitized; a non-string
+    // value triggers validateExtractedRecipe at the cache boundary.
+    const deps = makeDeps({
+      tiktokScraper: stubScraper({ caption: REAL_CAPTION, imageUrl: 123 as unknown as string }),
+      store,
+    });
+    const app = buildApp(deps);
+
+    const res = await extract(app, TIKTOK_URL);
+    expect(res.statusCode).toBe(500);
+
+    // The recipe was never cached
+    expect(setJsonSpy).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('caches a valid ExtractedRecipe', async () => {
+    const store = createStore({ upstashUrl: '', upstashToken: '' });
+    const setJsonSpy = vi.spyOn(store, 'setJson');
+
+    const deps = makeDeps({ store });
+    const app = buildApp(deps);
+
+    const res = await extract(app, TIKTOK_URL);
+    expect(res.statusCode).toBe(200);
+
+    // The recipe was cached (setJson called at least once)
+    expect(setJsonSpy).toHaveBeenCalled();
     await app.close();
   });
 });
