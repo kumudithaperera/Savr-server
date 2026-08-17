@@ -20,7 +20,7 @@ interface ImproveDeps {
   globalDailyImproveLimit: number;
 }
 
-type ImproveMode = 'substitutes' | 'healthier' | 'reconcile-steps';
+type ImproveMode = 'substitutes' | 'healthier' | 'reconcile-steps' | 'reconcile-steps-batch';
 
 interface ImproveBody {
   mode?: unknown;
@@ -28,6 +28,7 @@ interface ImproveBody {
   goal?: unknown;
   from?: unknown;
   to?: unknown;
+  swaps?: unknown;
 }
 
 /** Validates and coerces the request body's `recipe` into a `RecipeInput`. */
@@ -72,8 +73,15 @@ export function registerImproveRoute(app: FastifyInstance, deps: ImproveDeps): v
 
   app.post<{ Body: ImproveBody }>('/improve', async (request) => {
     const mode = request.body?.mode as ImproveMode;
-    if (mode !== 'substitutes' && mode !== 'healthier' && mode !== 'reconcile-steps') {
-      throw unprocessable("mode must be 'substitutes', 'healthier', or 'reconcile-steps'.");
+    if (
+      mode !== 'substitutes' &&
+      mode !== 'healthier' &&
+      mode !== 'reconcile-steps' &&
+      mode !== 'reconcile-steps-batch'
+    ) {
+      throw unprocessable(
+        "mode must be 'substitutes', 'healthier', 'reconcile-steps', or 'reconcile-steps-batch'.",
+      );
     }
     const recipe = assertRecipeInput(request.body?.recipe);
 
@@ -105,6 +113,30 @@ export function registerImproveRoute(app: FastifyInstance, deps: ImproveDeps): v
         throw unprocessable("'from' and 'to' ingredient lines are required.");
       }
       return deps.improver.reconcileSteps(recipe, from, to);
+    }
+
+    if (mode === 'reconcile-steps-batch') {
+      if (!Array.isArray(request.body?.swaps)) {
+        throw unprocessable("'swaps' must be an array.");
+      }
+      const swaps = request.body!.swaps as unknown[];
+      if (swaps.length === 0) {
+        throw unprocessable("'swaps' must not be empty.");
+      }
+      if (swaps.length > 10) {
+        throw unprocessable("'swaps' must not exceed 10 entries.");
+      }
+      const validated: { from: string; to: string }[] = [];
+      for (let i = 0; i < swaps.length; i++) {
+        const s = swaps[i] as Record<string, unknown>;
+        const from = typeof s?.from === 'string' ? s.from.trim() : '';
+        const to = typeof s?.to === 'string' ? s.to.trim() : '';
+        if (!from || !to) {
+          throw unprocessable(`'swaps[${i}]' must have non-empty 'from' and 'to' strings.`);
+        }
+        validated.push({ from, to });
+      }
+      return deps.improver.reconcileStepsBatch(recipe, validated);
     }
 
     const goal =

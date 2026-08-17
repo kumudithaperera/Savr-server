@@ -122,3 +122,54 @@ describe('createGeminiRecipeImprover.reconcileSteps', () => {
     expect(called).toBe(false);
   });
 });
+
+describe('createGeminiRecipeImprover.reconcileStepsBatch', () => {
+  it('returns the rewritten steps for multiple swaps', async () => {
+    const improver = createGeminiRecipeImprover(
+      config,
+      fakeFetch({ steps: ['Boil pasta', 'Heat the olive oil', 'Add oat milk'] }),
+    );
+    const swaps = [
+      { from: '2 tbsp butter', to: '2 tbsp olive oil' },
+      { from: 'milk', to: 'oat milk' },
+    ];
+    const result = await improver.reconcileStepsBatch(recipe, swaps);
+    expect(result.steps).toEqual(['Boil pasta', 'Heat the olive oil', 'Add oat milk']);
+  });
+
+  it('falls back to the original steps when the model returns none', async () => {
+    const improver = createGeminiRecipeImprover(config, fakeFetch({ steps: [] }));
+    const swaps = [
+      { from: '2 tbsp butter', to: '2 tbsp olive oil' },
+      { from: 'milk', to: 'oat milk' },
+    ];
+    const result = await improver.reconcileStepsBatch(recipe, swaps);
+    expect(result.steps).toEqual(recipe.steps);
+  });
+
+  it('skips the request entirely when there are no steps', async () => {
+    let called = false;
+    const improver = createGeminiRecipeImprover(config, (async () => {
+      called = true;
+      return {} as unknown as Response;
+    }) as typeof fetch);
+    const swaps = [
+      { from: '2 tbsp butter', to: '2 tbsp olive oil' },
+      { from: 'milk', to: 'oat milk' },
+    ];
+    const result = await improver.reconcileStepsBatch({ ...recipe, steps: [] }, swaps);
+    expect(result.steps).toEqual([]);
+    expect(called).toBe(false);
+  });
+
+  it('returns original steps when swaps array is empty', async () => {
+    let called = false;
+    const improver = createGeminiRecipeImprover(config, (async () => {
+      called = true;
+      return {} as unknown as Response;
+    }) as typeof fetch);
+    const result = await improver.reconcileStepsBatch(recipe, []);
+    expect(result.steps).toEqual(recipe.steps);
+    expect(called).toBe(false);
+  });
+});

@@ -17,6 +17,10 @@ export interface RecipeImprover {
    * recipe passed in should already have the new ingredient in its list.
    */
   reconcileSteps(recipe: RecipeInput, from: string, to: string): Promise<{ steps: string[] }>;
+  reconcileStepsBatch(
+    recipe: RecipeInput,
+    swaps: { from: string; to: string }[],
+  ): Promise<{ steps: string[] }>;
 }
 
 const MACROS_SCHEMA = {
@@ -90,6 +94,16 @@ Rules:
 - Change ONLY what the substitution requires: references to the old ingredient's name, quantity, or handling become the new ingredient's. If the new ingredient needs a different technique, time, or temperature, adjust that step accordingly.
 - Leave every other step exactly as written.
 - Preserve the original step order. Keep the same number of steps unless the swap genuinely makes one redundant.
+- Return the FULL ordered list of steps, not just the changed ones.`;
+
+const RECONCILE_STEPS_BATCH_PROMPT = `You are a cooking assistant. The user made multiple ingredient substitutions in a recipe. Rewrite the preparation steps so they correctly reflect ALL the new ingredients.
+
+Return JSON only, matching the provided schema.
+
+Rules:
+- Change ONLY what each substitution requires: references to an old ingredient's name, quantity, or handling become the new ingredient's. If a new ingredient needs a different technique, time, or temperature, adjust that step accordingly.
+- Leave every other step exactly as written.
+- Preserve the original step order. Keep the same number of steps unless a swap genuinely makes one redundant.
 - Return the FULL ordered list of steps, not just the changed ones.`;
 
 const SUBSTITUTES_PROMPT = `You are a cooking assistant. Given a recipe, suggest practical ingredient substitutions.
@@ -279,6 +293,28 @@ export function createGeminiRecipeImprover(
 
       // Fall back to the original steps rather than wiping them if the model
       // returns nothing usable — the ingredient swap must not lose the method.
+      return { steps: steps.length > 0 ? steps : recipe.steps };
+    },
+
+    async reconcileStepsBatch(
+      recipe: RecipeInput,
+      swaps: { from: string; to: string }[],
+    ): Promise<{ steps: string[] }> {
+      if (recipe.steps.length === 0) return { steps: [] };
+      if (swaps.length === 0) return { steps: recipe.steps };
+
+      const swapList = swaps.map((s) => `- Replace "${s.from}" with "${s.to}"`).join('\n');
+      const userText =
+        `${recipeToPrompt(recipe)}\n\n` +
+        `Substitutions made:\n${swapList}`;
+      const raw = (await callGemini(RECONCILE_STEPS_BATCH_PROMPT, userText, STEPS_SCHEMA)) as {
+        steps?: unknown;
+      };
+
+      const steps = (Array.isArray(raw?.steps) ? raw.steps : [])
+        .map((s) => (typeof s === 'string' ? s.trim() : ''))
+        .filter((s) => s.length > 0);
+
       return { steps: steps.length > 0 ? steps : recipe.steps };
     },
   };
