@@ -136,3 +136,30 @@ export interface ImprovedRecipe {
   /** One-line note describing what changed vs the original. */
   summary: string;
 }
+
+/** Direction of a taste adjustment: dial an ingredient up or down. */
+export type AdjustDirection = 'less' | 'more';
+
+/** How strongly to adjust the target ingredient/dimension. */
+export type AdjustAmount = 'a little' | 'moderately' | 'a lot';
+
+/** What the user asked the AI to dial up or down (the `adjust` improve mode). */
+export interface AdjustmentInput {
+  /** The ingredient or flavor dimension to change, e.g. "salt" or "chili flakes". */
+  target: string;
+  direction: AdjustDirection;
+  amount: AdjustAmount;
+}
+
+/**
+ * A recipe rebalanced toward a taste adjustment, produced by the `adjust`
+ * improve mode. Unlike `ImprovedRecipe` it has no title/servings - the app
+ * rewrites the recipe in place and keeps the original's.
+ */
+export interface AdjustmentResult {
+  ingredients: string[];
+  steps: string[];
+  macros: Macros;
+  /** One-line note describing what changed vs the original. */
+  summary: string;
+}

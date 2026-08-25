@@ -16,6 +16,7 @@ const recipe: RecipeInput = {
 type MockedImprover = {
   suggestSubstitutes: Mock<RecipeImprover['suggestSubstitutes']>;
   makeHealthier: Mock<RecipeImprover['makeHealthier']>;
+  adjust: Mock<RecipeImprover['adjust']>;
   reconcileSteps: Mock<RecipeImprover['reconcileSteps']>;
   reconcileStepsBatch: Mock<RecipeImprover['reconcileStepsBatch']>;
 };
@@ -24,6 +25,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps & { improver: Mocke
   const improver: MockedImprover = {
     suggestSubstitutes: vi.fn<RecipeImprover['suggestSubstitutes']>(),
     makeHealthier: vi.fn<RecipeImprover['makeHealthier']>(),
+    adjust: vi.fn<RecipeImprover['adjust']>(),
     reconcileSteps: vi.fn<RecipeImprover['reconcileSteps']>(),
     reconcileStepsBatch: vi.fn<RecipeImprover['reconcileStepsBatch']>(),
   };
@@ -51,6 +53,79 @@ function batchImprove(app: ReturnType<typeof buildApp>, swaps: unknown[]) {
     },
   });
 }
+
+function adjust(app: ReturnType<typeof buildApp>, body: Record<string, unknown>) {
+  return app.inject({
+    method: 'POST',
+    url: '/improve',
+    payload: { mode: 'adjust', recipe, ...body },
+  });
+}
+
+describe('POST /improve — adjust', () => {
+  it('dispatches to adjust with a validated target/direction/amount', async () => {
+    const deps = makeDeps();
+    deps.improver.adjust.mockResolvedValue({
+      ingredients: ['1 tsp salt', '200g spaghetti'],
+      steps: ['Boil pasta'],
+      macros: { calories: 450, carbs: 60, protein: 12, fat: 18 },
+      summary: 'Reduced salt',
+    });
+
+    const app = buildApp(deps);
+    const res = await adjust(app, { target: 'salt', direction: 'less', amount: 'a lot' });
+
+    expect(res.statusCode).toBe(200);
+    expect(deps.improver.adjust).toHaveBeenCalledOnce();
+    expect(deps.improver.adjust).toHaveBeenCalledWith(recipe, {
+      target: 'salt',
+      direction: 'less',
+      amount: 'a lot',
+    });
+    await app.close();
+  });
+
+  it('defaults amount to "moderately" when omitted', async () => {
+    const deps = makeDeps();
+    deps.improver.adjust.mockResolvedValue({
+      ingredients: recipe.ingredients,
+      steps: recipe.steps,
+      macros: { calories: 500, carbs: 60, protein: 12, fat: 20 },
+      summary: '',
+    });
+
+    const app = buildApp(deps);
+    const res = await adjust(app, { target: 'spice', direction: 'more' });
+
+    expect(res.statusCode).toBe(200);
+    expect(deps.improver.adjust).toHaveBeenCalledWith(recipe, {
+      target: 'spice',
+      direction: 'more',
+      amount: 'moderately',
+    });
+    await app.close();
+  });
+
+  it('returns 422 for a missing target', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+    const res = await adjust(app, { direction: 'less', amount: 'a little' });
+
+    expect(res.statusCode).toBe(422);
+    expect(deps.improver.adjust).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('returns 422 for an invalid direction', async () => {
+    const deps = makeDeps();
+    const app = buildApp(deps);
+    const res = await adjust(app, { target: 'salt', direction: 'sideways' });
+
+    expect(res.statusCode).toBe(422);
+    expect(deps.improver.adjust).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
 
 describe('POST /improve — reconcile-steps-batch', () => {
   it('dispatches to reconcileStepsBatch with validated swaps', async () => {

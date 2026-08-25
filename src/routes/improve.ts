@@ -20,12 +20,20 @@ interface ImproveDeps {
   globalDailyImproveLimit: number;
 }
 
-type ImproveMode = 'substitutes' | 'healthier' | 'reconcile-steps' | 'reconcile-steps-batch';
+type ImproveMode =
+  | 'substitutes'
+  | 'healthier'
+  | 'adjust'
+  | 'reconcile-steps'
+  | 'reconcile-steps-batch';
 
 interface ImproveBody {
   mode?: unknown;
   recipe?: unknown;
   goal?: unknown;
+  target?: unknown;
+  direction?: unknown;
+  amount?: unknown;
   from?: unknown;
   to?: unknown;
   swaps?: unknown;
@@ -76,11 +84,12 @@ export function registerImproveRoute(app: FastifyInstance, deps: ImproveDeps): v
     if (
       mode !== 'substitutes' &&
       mode !== 'healthier' &&
+      mode !== 'adjust' &&
       mode !== 'reconcile-steps' &&
       mode !== 'reconcile-steps-batch'
     ) {
       throw unprocessable(
-        "mode must be 'substitutes', 'healthier', 'reconcile-steps', or 'reconcile-steps-batch'.",
+        "mode must be 'substitutes', 'healthier', 'adjust', 'reconcile-steps', or 'reconcile-steps-batch'.",
       );
     }
     const recipe = assertRecipeInput(request.body?.recipe);
@@ -104,6 +113,23 @@ export function registerImproveRoute(app: FastifyInstance, deps: ImproveDeps): v
 
     if (mode === 'substitutes') {
       return deps.improver.suggestSubstitutes(recipe);
+    }
+
+    if (mode === 'adjust') {
+      const target = typeof request.body?.target === 'string' ? request.body.target.trim() : '';
+      if (!target) {
+        throw unprocessable("'target' is required.");
+      }
+      const direction = request.body?.direction;
+      if (direction !== 'less' && direction !== 'more') {
+        throw unprocessable("'direction' must be 'less' or 'more'.");
+      }
+      const amount = request.body?.amount;
+      const resolvedAmount =
+        amount === 'a little' || amount === 'moderately' || amount === 'a lot'
+          ? amount
+          : 'moderately';
+      return deps.improver.adjust(recipe, { target, direction, amount: resolvedAmount });
     }
 
     if (mode === 'reconcile-steps') {

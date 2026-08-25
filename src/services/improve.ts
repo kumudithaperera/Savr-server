@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
 import type {
+  AdjustmentInput,
+  AdjustmentResult,
   ImprovedRecipe,
   Macros,
   RecipeInput,
@@ -11,6 +13,8 @@ import type {
 export interface RecipeImprover {
   suggestSubstitutes(recipe: RecipeInput): Promise<SubstitutionResult>;
   makeHealthier(recipe: RecipeInput, goal: string): Promise<ImprovedRecipe>;
+  /** Rebalances a recipe around a "dial up/down" taste adjustment. */
+  adjust(recipe: RecipeInput, input: AdjustmentInput): Promise<AdjustmentResult>;
   /**
    * Rewrites a recipe's steps to reflect a single ingredient substitution
    * (`from` -> `to`), so the instructions stay consistent after a swap. The
@@ -77,6 +81,18 @@ const HEALTHIER_SCHEMA = {
   required: ['title', 'ingredients', 'steps', 'macros', 'summary'],
 } as const;
 
+/** Structured-output schema for the `adjust` mode. */
+const ADJUST_SCHEMA = {
+  type: 'object',
+  properties: {
+    ingredients: { type: 'array', items: { type: 'string' } },
+    steps: { type: 'array', items: { type: 'string' } },
+    macros: MACROS_SCHEMA,
+    summary: { type: 'string' },
+  },
+  required: ['ingredients', 'steps', 'macros', 'summary'],
+} as const;
+
 /** Structured-output schema for the `reconcile-steps` mode. */
 const STEPS_SCHEMA = {
   type: 'object',
@@ -85,6 +101,16 @@ const STEPS_SCHEMA = {
   },
   required: ['steps'],
 } as const;
+
+const ADJUST_PROMPT = `You are a cooking assistant. The user wants to adjust a recipe "to taste" by dialing one ingredient or flavor dimension up or down. Rebalance the rest of the recipe so it still works.
+
+Return JSON only, matching the provided schema.
+
+Rules:
+- ingredients: one item per array entry, quantity included. Dial the target ingredient/dimension in the requested direction and amount, and adjust other ingredients ONLY as needed to keep the dish balanced and realistic.
+- steps: ordered preparation steps, updated only where the change requires it (e.g. a changed quantity, a new ingredient, or different technique/time/temperature). Preserve the original order and keep the same number of steps unless the change genuinely makes one redundant.
+- macros: per-serving calories (kcal), carbs (g), protein (g), fat (g) — your best estimate for the adjusted recipe.
+- summary: one concise line describing what changed (e.g. "Halved the salt and brightened with extra lemon").`;
 
 const RECONCILE_STEPS_PROMPT = `You are a cooking assistant. The user swapped one ingredient in a recipe for another. Rewrite the preparation steps so they correctly reflect the new ingredient.
 
@@ -268,6 +294,31 @@ export function createGeminiRecipeImprover(
         ingredients,
         steps,
         macros: cleanMacros(raw.macros),
+        summary: typeof raw?.summary === 'string' ? raw.summary.trim() : '',
+      };
+    },
+
+    async adjust(recipe: RecipeInput, input: AdjustmentInput): Promise<AdjustmentResult> {
+      const userText =
+        `Adjustment: make "${input.target}" ${input.direction} (${input.amount}).\n\n` +
+        recipeToPrompt(recipe);
+      const raw = (await callGemini(ADJUST_PROMPT, userText, ADJUST_SCHEMA)) as AdjustmentResult;
+
+      const ingredients = (Array.isArray(raw?.ingredients) ? raw.ingredients : [])
+        .map((i) => (typeof i === 'string' ? i.trim() : ''))
+        .filter((i) => i.length > 0);
+      const steps = (Array.isArray(raw?.steps) ? raw.steps : [])
+        .map((s) => (typeof s === 'string' ? s.trim() : ''))
+        .filter((s) => s.length > 0);
+
+      if (ingredients.length === 0 && steps.length === 0) {
+        throw unprocessable('Could not adjust this recipe.');
+      }
+
+      return {
+        ingredients,
+        steps,
+        macros: cleanMacros(raw?.macros),
         summary: typeof raw?.summary === 'string' ? raw.summary.trim() : '',
       };
     },
