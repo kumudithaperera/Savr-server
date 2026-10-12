@@ -61,6 +61,9 @@ export interface EventWrite {
   payload: unknown;
 }
 
+/** Outcome of deleting the caller's account. */
+export type DeleteOutcome = 'deleted' | 'unauthorized' | 'failed';
+
 /** Outcome of recording an event, so the route can answer RevenueCat correctly. */
 export type RecordOutcome = 'recorded' | 'duplicate' | 'failed';
 
@@ -82,6 +85,12 @@ export interface Supabase {
    * already won, which is a success from the caller's point of view.
    */
   applySubscription(row: SubscriptionWrite): Promise<boolean>;
+  /**
+   * Deletes the account the caller's JWT belongs to. Supabase resolves the token
+   * to a user first, so the id deleted is never one the caller chose. Their
+   * `subscriptions` row goes with it (`on delete cascade`).
+   */
+  deleteUserForToken(token: string): Promise<DeleteOutcome>;
 }
 
 type Fetch = typeof fetch;
@@ -222,6 +231,44 @@ export function createSupabase(
         return 'recorded';
       } catch (error) {
         warn(`supabase: event insert threw (${String(error)})`);
+        return 'failed';
+      }
+    },
+
+    async deleteUserForToken(token: string): Promise<DeleteOutcome> {
+      if (!canWrite || !config.anonKey || !token) return 'failed';
+      try {
+        // 1. Who is this? Supabase verifies the token; a forged or expired one is
+        // a 401 here. Never read the id out of the JWT ourselves - an unverified
+        // `sub` would let anyone delete anyone.
+        const who = await doFetch(`${base}/auth/v1/user`, {
+          headers: { apikey: config.anonKey, authorization: `Bearer ${token}` },
+        });
+        if (who.status === 401 || who.status === 403) return 'unauthorized';
+        if (!who.ok) {
+          warn(`supabase: user lookup failed (${who.status})`);
+          return 'failed';
+        }
+        const user = (await who.json()) as { id?: unknown };
+        if (typeof user?.id !== 'string' || !user.id) return 'unauthorized';
+
+        // 2. Delete with the service role. 404 means it is already gone, which is
+        // what the caller asked for.
+        const removed = await doFetch(
+          `${base}/auth/v1/admin/users/${encodeURIComponent(user.id)}`,
+          { method: 'DELETE', headers: serviceHeaders() },
+        );
+        if (!removed.ok && removed.status !== 404) {
+          warn(`supabase: user delete failed (${removed.status})`);
+          return 'failed';
+        }
+
+        // The cached entitlement for this token would otherwise keep answering
+        // "plus" for up to five minutes after the row was cascaded away.
+        await store.setJson(tokenKey(token), { row: null, at: Date.now() } satisfies CachedEntitlement, STALE_TTL_SECONDS);
+        return 'deleted';
+      } catch (error) {
+        warn(`supabase: account delete threw (${String(error)})`);
         return 'failed';
       }
     },

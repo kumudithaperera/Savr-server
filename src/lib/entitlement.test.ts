@@ -28,6 +28,7 @@ function supabaseReturning(row: SubscriptionRow | null): Supabase {
     subscriptionForToken: vi.fn(async () => row),
     recordEvent: vi.fn(async () => 'recorded' as const),
     applySubscription: vi.fn(async () => true),
+    deleteUserForToken: vi.fn(async () => 'failed' as const),
   };
 }
 
@@ -38,6 +39,7 @@ const noSupabase: Supabase = {
   subscriptionForToken: vi.fn(async () => null),
   recordEvent: vi.fn(async () => 'failed' as const),
   applySubscription: vi.fn(async () => false),
+  deleteUserForToken: vi.fn(async () => 'failed' as const),
 };
 
 function emptyStore(): Store {

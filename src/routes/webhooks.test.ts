@@ -46,6 +46,9 @@ function fakeSupabase(): Supabase & {
       events.add(event.id);
       return 'recorded';
     },
+    async deleteUserForToken() {
+      return 'failed' as const;
+    },
     async applySubscription(row) {
       const existing = rows.get(row.user_id);
       if (existing && existing.last_event_ms >= row.last_event_ms) return false;

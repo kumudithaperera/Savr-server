@@ -34,6 +34,9 @@ const PROTECTED_PATHS = new Set([
   // whether a given device id holds Plus.
   '/redeem',
   '/entitlement',
+  // Needs the caller's JWT anyway; the app key and rate limit keep it from
+  // being a free oracle for testing stolen tokens.
+  '/account',
 ]);
 
 /**

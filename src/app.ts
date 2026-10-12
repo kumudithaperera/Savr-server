@@ -13,6 +13,7 @@ import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
 import { createSupabase, type Supabase } from './lib/supabase.js';
+import { registerAccountRoute } from './routes/account.js';
 import { registerExtractRoute, statsKey, fallbackStatsKey, deepseekStatsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
@@ -176,6 +177,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerImageSearchRoute(app, deps);
   registerNutritionRoute(app, deps);
   registerRedeemRoute(app, { store, supabase, redeem: deps.redeem ?? DEFAULT_REDEEM });
+  registerAccountRoute(app, { supabase });
   registerRevenueCatWebhook(app, {
     supabase,
     webhookSecret: deps.revenueCatWebhookSecret ?? '',
