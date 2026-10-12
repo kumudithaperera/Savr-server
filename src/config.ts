@@ -189,6 +189,19 @@ export interface Config {
    * logged, and grant nobody anything.
    */
   revenueCatEntitlementId: string;
+  /**
+   * Server-only pepper mixed into community board author hashes, so the
+   * Supabase tables alone can't be joined back to the device id the app sends.
+   * Set once and never change it: a new pepper gives every existing device a
+   * new identity, which silently lifts every ban and block.
+   */
+  communityHashPepper: string;
+  /**
+   * `memory` runs the ideas board on an in-process store for local dev (lost
+   * on restart). Anything else uses Supabase, and with no Supabase service role
+   * the board answers 503 rather than accepting posts into nowhere.
+   */
+  communityDb: 'supabase' | 'memory';
 }
 
 /** Reads a positive integer env var, falling back when unset or malformed. */
@@ -265,5 +278,7 @@ export function loadConfig(): Config {
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
     revenueCatWebhookSecret: process.env.REVENUECAT_WEBHOOK_SECRET ?? '',
     revenueCatEntitlementId: process.env.REVENUECAT_ENTITLEMENT_ID ?? 'Morsel Plus',
+    communityHashPepper: process.env.COMMUNITY_HASH_PEPPER ?? '',
+    communityDb: process.env.COMMUNITY_DB === 'memory' ? 'memory' : 'supabase',
   };
 }

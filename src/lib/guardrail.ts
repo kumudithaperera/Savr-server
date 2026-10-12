@@ -40,6 +40,17 @@ const PROTECTED_PATHS = new Set([
 ]);
 
 /**
+ * Path prefixes protected exactly like `PROTECTED_PATHS`. The ideas board has
+ * ids in its paths (`/community/posts/<uuid>/vote`), so it can't be listed
+ * path by path.
+ */
+const PROTECTED_PREFIXES = ['/community/'];
+
+function isProtected(path: string): boolean {
+  return PROTECTED_PATHS.has(path) || PROTECTED_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/**
  * Paths that get the per-IP rate limit but **not** the app-key check, with the
  * multiplier applied to the normal ceiling.
  *
@@ -100,7 +111,7 @@ export function createRequestGuard(
   return async function guard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const path = request.url.split('?')[0];
     const rateLimitOnly = RATE_LIMITED_ONLY_PATHS.get(path);
-    if (rateLimitOnly === undefined && !PROTECTED_PATHS.has(path)) return;
+    if (rateLimitOnly === undefined && !isProtected(path)) return;
 
     if (rateLimitOnly === undefined && appSharedSecret) {
       const provided = request.headers[APP_KEY_HEADER];

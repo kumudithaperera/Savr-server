@@ -7,13 +7,16 @@ import type { VideoRecipeParser } from './services/gemini-video.js';
 import type { PhotoSearch } from './services/images.js';
 import type { RecipeImprover } from './services/improve.js';
 import type { NutritionLookup } from './services/nutrition.js';
+import type { ContentModerator } from './services/moderation.js';
 import type { TikTokScraper } from './services/tiktok.js';
 import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
+import { createUnconfiguredCommunityDb, type CommunityDb } from './lib/community-db.js';
 import { createSupabase, type Supabase } from './lib/supabase.js';
 import { registerAccountRoute } from './routes/account.js';
+import { registerCommunityRoutes } from './routes/community.js';
 import { registerExtractRoute, statsKey, fallbackStatsKey, deepseekStatsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
@@ -79,6 +82,15 @@ export interface AppDeps {
   revenueCatWebhookSecret?: string;
   /** Entitlement id meaning Plus, as spelled in the RevenueCat dashboard. */
   revenueCatEntitlementId?: string;
+  /**
+   * Storage for the ideas board. Omitted = unconfigured, and every
+   * `/community/` route answers 503 rather than accepting posts into nowhere.
+   */
+  communityDb?: CommunityDb;
+  /** AI pre-check for board posts/comments. Omitted = local checks only. */
+  moderator?: ContentModerator;
+  /** Server-only pepper for board author hashes. See `routes/community.ts`. */
+  communityHashPepper?: string;
 }
 
 /**
@@ -178,6 +190,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerNutritionRoute(app, deps);
   registerRedeemRoute(app, { store, supabase, redeem: deps.redeem ?? DEFAULT_REDEEM });
   registerAccountRoute(app, { supabase });
+  registerCommunityRoutes(app, {
+    db: deps.communityDb ?? createUnconfiguredCommunityDb(),
+    store,
+    moderator: deps.moderator,
+    hashPepper: deps.communityHashPepper ?? '',
+  });
   registerRevenueCatWebhook(app, {
     supabase,
     webhookSecret: deps.revenueCatWebhookSecret ?? '',

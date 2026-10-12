@@ -1,5 +1,6 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { createMemoryCommunityDb, createSupabaseCommunityDb } from './lib/community-db.js';
 import { createStore } from './lib/store.js';
 import { createSupabase } from './lib/supabase.js';
 import { createApifyInstagramScraper } from './services/apify.js';
@@ -8,6 +9,7 @@ import { createGeminiRecipeParser } from './services/gemini.js';
 import { createGeminiVideoParser } from './services/gemini-video.js';
 import { createPexelsPhotoSearch } from './services/images.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
+import { createGeminiModerator } from './services/moderation.js';
 import { createBrandFirstNutritionLookup, createUsdaNutritionLookup, createDeepSeekNutritionLookup } from './services/nutrition.js';
 import { createOpenFoodFactsLookup } from './services/openfoodfacts.js';
 import { createApifyTikTokScraper } from './services/tiktok.js';
@@ -44,6 +46,15 @@ const app = buildApp({
   ),
   revenueCatWebhookSecret: config.revenueCatWebhookSecret,
   revenueCatEntitlementId: config.revenueCatEntitlementId,
+  communityDb:
+    config.communityDb === 'memory'
+      ? createMemoryCommunityDb()
+      : createSupabaseCommunityDb({
+          url: config.supabaseUrl,
+          serviceRoleKey: config.supabaseServiceRoleKey,
+        }),
+  moderator: createGeminiModerator(config),
+  communityHashPepper: config.communityHashPepper,
   limits: {
     monthlyDeviceExtractionLimit: config.monthlyDeviceExtractionLimit,
     plusDeviceExtractionLimit: config.plusDeviceExtractionLimit,
@@ -105,6 +116,21 @@ if (config.supabaseUrl && !config.revenueCatWebhookSecret) {
     'REVENUECAT_WEBHOOK_SECRET is unset - /webhooks/revenuecat rejects every delivery. This ' +
       'endpoint fails closed on purpose: it decides who has paid. Set it here and set the same ' +
       "value as the webhook's Authorization header in the RevenueCat dashboard.",
+  );
+}
+
+if (config.communityDb === 'memory') {
+  app.log.warn('COMMUNITY_DB=memory - the ideas board is in-process and is wiped on every restart. Local dev only.');
+} else if (!config.supabaseUrl || !config.supabaseServiceRoleKey) {
+  app.log.warn(
+    'Supabase service role is unset - the ideas board (/community/*) answers 503. Set SUPABASE_URL and ' +
+      'SUPABASE_SERVICE_ROLE_KEY and run supabase/003_community.sql, or COMMUNITY_DB=memory locally.',
+  );
+}
+if (!config.communityHashPepper) {
+  app.log.warn(
+    'COMMUNITY_HASH_PEPPER is unset - board author hashes are a plain hash of the device id. Set a ' +
+      'random value before the board goes live, and never change it afterwards (it would lift every ban).',
   );
 }
 
