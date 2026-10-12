@@ -10,6 +10,7 @@ import type {
   ReportReason,
   TargetType,
 } from '../lib/community-db.js';
+import { TEAM_AUTHOR_HASH } from '../lib/community-seed.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
 import { deviceIdOf } from '../lib/grants.js';
 import type { Store } from '../lib/store.js';
@@ -93,6 +94,8 @@ export interface PostDto {
   commentCount: number;
   createdAt: string;
   isMine: boolean;
+  /** Posted by the Morsel team (the seeded roadmap), shown with a "Morsel" tag. */
+  isTeam: boolean;
 }
 
 export interface CommentDto {
@@ -117,6 +120,7 @@ function toPostDto(row: PostRow, me: string | null, myVote: -1 | 0 | 1): PostDto
     commentCount: row.comment_count,
     createdAt: row.created_at,
     isMine: me !== null && row.author_hash === me,
+    isTeam: row.author_hash === TEAM_AUTHOR_HASH,
   };
 }
 
@@ -403,6 +407,7 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     const me = await writer(request, 'block');
     const author = await authorOf(targetType, targetId);
     if (author === me) throw badRequest("You can't hide your own posts.");
+    if (author === TEAM_AUTHOR_HASH) throw badRequest("Posts from the Morsel team can't be hidden.");
     await db.insertBlock(me, author);
     return { blocked: true };
   });

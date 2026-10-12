@@ -304,3 +304,40 @@ describe('community board', () => {
     expect(ok.statusCode).toBe(200);
   });
 });
+
+describe('community seed', () => {
+  it('starts the memory board with the roadmap, tagged as the team, and the SQL matches it', async () => {
+    const { SEED_POSTS, seedSql } = await import('../lib/community-seed.js');
+    const db = createMemoryCommunityDb({ seed: SEED_POSTS });
+    const app = buildApp({
+      instagramScraper: { scrape: vi.fn() },
+      tiktokScraper: { scrape: vi.fn() },
+      webScraper: { scrape: vi.fn() },
+      parser: { parse: vi.fn() },
+      improver: {} as AppDeps['improver'],
+      photoSearch: { search: vi.fn(async () => null) },
+      nutrition: { search: vi.fn(async () => null) },
+      appSharedSecret: '',
+      communityDb: db,
+      communityHashPepper: PEPPER,
+    } as AppDeps);
+    const tab = async (name: string) =>
+      (await app.inject({ method: 'GET', url: `/community/posts?tab=${name}`, headers: { 'x-morsel-device-id': 'x' } })).json().posts;
+
+    const shipped = await tab('shipped');
+    const planned = await tab('planned');
+    expect(shipped.length).toBe(SEED_POSTS.filter((p) => p.status === 'shipped').length);
+    expect(shipped[0]).toMatchObject({ title: SEED_POSTS[0].title, isTeam: true, isMine: false });
+    expect(planned.map((p: { status: string }) => p.status)).toEqual(
+      expect.arrayContaining(['planned', 'in_progress']),
+    );
+    expect(await tab('ideas')).toEqual([]);
+
+    // The committed SQL is exactly what the list generates.
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const sqlPath = fileURLToPath(new URL('../../supabase/004_seed_roadmap.sql', import.meta.url).href);
+    const committed = readFileSync(sqlPath, 'utf8');
+    expect(committed).toBe(seedSql());
+  });
+});

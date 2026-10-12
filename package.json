@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed:sql": "tsx -e \"import('./src/lib/community-seed.ts').then(m => process.stdout.write(m.seedSql()))\" > supabase/004_seed_roadmap.sql"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

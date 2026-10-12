@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createMemoryCommunityDb, createSupabaseCommunityDb } from './lib/community-db.js';
+import { SEED_POSTS } from './lib/community-seed.js';
 import { createStore } from './lib/store.js';
 import { createSupabase } from './lib/supabase.js';
 import { createApifyInstagramScraper } from './services/apify.js';
@@ -48,7 +49,7 @@ const app = buildApp({
   revenueCatEntitlementId: config.revenueCatEntitlementId,
   communityDb:
     config.communityDb === 'memory'
-      ? createMemoryCommunityDb()
+      ? createMemoryCommunityDb({ seed: SEED_POSTS })
       : createSupabaseCommunityDb({
           url: config.supabaseUrl,
           serviceRoleKey: config.supabaseServiceRoleKey,

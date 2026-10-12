@@ -21,6 +21,8 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { TEAM_AUTHOR_HASH, type SeedPost } from './community-seed.js';
+
 /** Distinct reporters that hide an item until an admin looks. Mirrors the SQL trigger. */
 export const REPORT_HIDE_THRESHOLD = 3;
 
@@ -291,8 +293,12 @@ export function createSupabaseCommunityDb(
 
 // --- Memory -----------------------------------------------------------------
 
-/** In-process board for tests and local dev. Mirrors the SQL triggers. */
-export function createMemoryCommunityDb(): CommunityDb & {
+/**
+ * In-process board for tests and local dev. Mirrors the SQL triggers. Pass
+ * `seed` (local dev passes `SEED_POSTS`) to start with the roadmap, as the
+ * Supabase board does after `004_seed_roadmap.sql`.
+ */
+export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): CommunityDb & {
   /** Test/admin hooks standing in for the Supabase dashboard. */
   admin: {
     setStatus(id: string, status: PostStatus, shippedVersion?: string): void;
@@ -313,6 +319,27 @@ export function createMemoryCommunityDb(): CommunityDb & {
     last = Math.max(Date.now(), last + 1);
     return new Date(last).toISOString();
   };
+
+  // Earlier in the seed list = newer, matching the SQL seed's timestamps.
+  const seedStart = Date.now();
+  (options.seed ?? []).forEach((post, index) => {
+    const at = new Date(seedStart - (index + 1) * 60_000).toISOString();
+    posts.set(post.id, {
+      id: post.id,
+      author_hash: TEAM_AUTHOR_HASH,
+      title: post.title,
+      body: post.body,
+      status: post.status,
+      shipped_version: null,
+      shipped_at: post.status === 'shipped' ? at : null,
+      score: 0,
+      comment_count: 0,
+      report_count: 0,
+      hidden: false,
+      needs_review: false,
+      created_at: at,
+    });
+  });
 
   function rescore(postId: string): void {
     const post = posts.get(postId);
