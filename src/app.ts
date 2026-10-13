@@ -15,7 +15,7 @@ import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from '.
 import { createStore, type Store } from './lib/store.js';
 import { createUnconfiguredCommunityDb, type CommunityDb } from './lib/community-db.js';
 import { createUnconfiguredDiscoverDb, type DiscoverDb } from './lib/discover-db.js';
-import { createDiscoverIndexer } from './lib/discover-indexer.js';
+import { createDiscoverIndexer, sweepUntaggedPosts } from './lib/discover-indexer.js';
 import { createUnconfiguredRecipeFeedDb, type RecipeFeedDb } from './lib/recipe-feed-db.js';
 import type { RecipeClassifier } from './services/classify.js';
 import { createPassthroughRehoster, type ImageRehoster } from './services/rehost.js';
@@ -211,10 +211,14 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     dailyClassifyLimit: deps.globalDailyClassifyLimit ?? DEFAULT_GLOBAL_DAILY_CLASSIFY_LIMIT,
   };
   const indexer = createDiscoverIndexer({ ...classifyBudget, db: discoverDb, rehoster });
+  const recipeFeedDb = deps.recipeFeedDb ?? createUnconfiguredRecipeFeedDb();
   // Retry classification for rows that missed it (over budget, Gemini blip,
   // backfilled). Production only - tests never pass an interval.
   if (deps.discoverSweepMs) {
-    const timer = setInterval(() => void indexer.sweep(20, app.log), deps.discoverSweepMs);
+    const timer = setInterval(async () => {
+      await indexer.sweep(20, app.log);
+      await sweepUntaggedPosts(recipeFeedDb, classifyBudget, 10, app.log);
+    }, deps.discoverSweepMs);
     // Don't hold the process open for it (Node's Timeout; typed loosely so
     // the app's DOM-typed tsc pass over this file agrees).
     (timer as { unref?: () => void }).unref?.();
@@ -245,7 +249,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   registerRecipeFeedRoutes(app, {
     ...classifyBudget,
-    db: deps.recipeFeedDb ?? createUnconfiguredRecipeFeedDb(),
+    db: recipeFeedDb,
     communityDb,
     moderator: deps.moderator,
     rehoster,

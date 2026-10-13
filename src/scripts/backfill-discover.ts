@@ -117,7 +117,7 @@ if (classifyLimit > 0 && !dryRun) {
     store,
     classifier: createGeminiClassifier({
       geminiApiKey: env('GEMINI_API_KEY'),
-      geminiModel: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+      geminiModel: process.env.GEMINI_LIGHT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     }),
     rehoster: createSupabaseImageRehoster({ ...serviceRole, bucket: 'unused' }),
     dailyClassifyLimit: Number.MAX_SAFE_INTEGER,

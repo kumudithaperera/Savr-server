@@ -1,6 +1,7 @@
 import type { ClassifyInput, RecipeClassifier } from '../services/classify.js';
 import type { ImageRehoster } from '../services/rehost.js';
 import type { DiscoverDb } from './discover-db.js';
+import type { RecipeFeedDb } from './recipe-feed-db.js';
 import { DAY_TTL_SECONDS, dayKey } from './period.js';
 import { facetColumns, type RecipeFacets } from './recipe-facets.js';
 import type { Store } from './store.js';
@@ -122,4 +123,30 @@ export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
       return tagged;
     },
   };
+}
+
+/**
+ * The same retry for community posts: a share whose classify call failed
+ * (usually a Gemini rate limit right after its moderation call) is tagged
+ * later instead of never. Returns how many were tagged; never rejects.
+ */
+export async function sweepUntaggedPosts(
+  db: RecipeFeedDb,
+  budget: ClassifyBudget,
+  limit: number,
+  log?: Logger,
+): Promise<number> {
+  if (!db.configured || !budget.classifier) return 0;
+  let tagged = 0;
+  try {
+    for (const post of await db.untagged(limit)) {
+      const facets = await classifyWithinBudget(budget, post.recipe, log);
+      if (!facets) break;
+      await db.setFacets(post.id, facets);
+      tagged++;
+    }
+  } catch (error) {
+    log?.warn({ err: (error as Error).message }, 'feed: tag sweep failed');
+  }
+  return tagged;
 }

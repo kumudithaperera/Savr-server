@@ -61,11 +61,11 @@ const app = buildApp({
           url: config.supabaseUrl,
           serviceRoleKey: config.supabaseServiceRoleKey,
         }),
-  moderator: createGeminiModerator(config),
+  moderator: createGeminiModerator({ geminiApiKey: config.geminiApiKey, geminiModel: config.geminiLightModel }),
   communityHashPepper: config.communityHashPepper,
   discoverDb: discoverInMemory ? createMemoryDiscoverDb() : createSupabaseDiscoverDb(serviceRole),
   recipeFeedDb: discoverInMemory ? createMemoryRecipeFeedDb() : createSupabaseRecipeFeedDb(serviceRole),
-  classifier: createGeminiClassifier(config),
+  classifier: createGeminiClassifier({ geminiApiKey: config.geminiApiKey, geminiModel: config.geminiLightModel }),
   rehoster:
     discoverInMemory || !config.supabaseServiceRoleKey
       ? createPassthroughRehoster()

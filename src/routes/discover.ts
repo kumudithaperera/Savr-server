@@ -58,8 +58,11 @@ export interface DiscoverItemDto extends ReturnType<typeof facetDto> {
   saveCount: number;
 }
 
-function creatorOf(row: Pick<IndexRow, 'creator' | 'source_url'>): string {
+function creatorOf(row: Pick<IndexRow, 'creator' | 'source_url' | 'source_platform'>): string {
   if (row.creator) return row.creator;
+  // A social post whose author we don't know (backfilled entries) is credited to the platform.
+  if (row.source_platform === 'instagram') return 'Instagram';
+  if (row.source_platform === 'tiktok') return 'TikTok';
   try {
     return new URL(row.source_url).hostname.replace(/^www\./, '');
   } catch {

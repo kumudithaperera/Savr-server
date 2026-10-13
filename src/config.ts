@@ -218,6 +218,13 @@ export interface Config {
    * the `/improve` allowance users see.
    */
   globalDailyClassifyLimit: number;
+  /**
+   * Gemini model for the small, frequent calls: community moderation and
+   * recipe tagging. Defaults to `geminiModel`. Point it at a lighter model
+   * with its own quota so posting and tagging don't eat the extraction
+   * allowance (on the free tier a model can be capped at ~20 requests/day).
+   */
+  geminiLightModel: string;
 }
 
 /** Reads a positive integer env var, falling back when unset or malformed. */
@@ -299,5 +306,6 @@ export function loadConfig(): Config {
     discoverDb: process.env.DISCOVER_DB === 'memory' ? 'memory' : 'supabase',
     communityImageBucket: process.env.COMMUNITY_IMAGE_BUCKET ?? 'community-images',
     globalDailyClassifyLimit: numberFromEnv('GLOBAL_DAILY_CLASSIFY_LIMIT', 300),
+    geminiLightModel: process.env.GEMINI_LIGHT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
   };
 }

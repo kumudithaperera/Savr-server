@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildApp, type AppDeps } from '../app.js';
 import { createMemoryCommunityDb } from '../lib/community-db.js';
 import { upstreamError } from '../lib/errors.js';
+import { sweepUntaggedPosts } from '../lib/discover-indexer.js';
 import { createMemoryRecipeFeedDb } from '../lib/recipe-feed-db.js';
+import { createStore } from '../lib/store.js';
 import type { ContentModerator } from '../services/moderation.js';
 import type { ImageRehoster } from '../services/rehost.js';
 
@@ -279,5 +281,15 @@ describe('community recipe feed', () => {
       const updated = await as('alice').put(`/community/recipes/${post.id}`, { recipe: shared({ title: 'Dal v2' }) });
       expect(updated.json().post.imageUrl).toBe('https://bucket.test/jpeg-8');
     });
+  });
+
+  it('tags a post later when classification failed at share time', async () => {
+    const { db, share } = setup();
+    const post = await share('alice');
+    expect(db.admin.posts()[0].difficulty).toBeNull();
+    const classifier = { classify: vi.fn(async () => ({ dietTags: ['vegan' as const], totalMinutes: 30, difficulty: 'easy' as const })) };
+    const store = createStore({ upstashUrl: '', upstashToken: '' });
+    expect(await sweepUntaggedPosts(db, { store, classifier, dailyClassifyLimit: 10 }, 10)).toBe(1);
+    expect(db.admin.posts().find((p) => p.id === post.id)).toMatchObject({ difficulty: 'easy', diet_tags: ['vegan'] });
   });
 });
