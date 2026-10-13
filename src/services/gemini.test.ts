@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createGeminiRecipeParser } from './gemini.js';
-import { GEMINI_RETRY_DELAY_MS } from '../lib/geminiFetch.js';
+import { GEMINI_MAX_ATTEMPTS } from '../lib/geminiFetch.js';
 import type { ParsedRecipe } from '../lib/types.js';
 
 const CONFIG = { geminiApiKey: 'test-key', geminiModel: 'gemini-2.5-flash' };
@@ -60,7 +60,7 @@ describe('createGeminiRecipeParser', () => {
       const parser = createGeminiRecipeParser(CONFIG, fetchImpl);
 
       const resultPromise = parser.parse(CAPTION);
-      await vi.advanceTimersByTimeAsync(GEMINI_RETRY_DELAY_MS);
+      await vi.runAllTimersAsync();
 
       const result = await resultPromise;
       expect(result.title).toBe('Pancakes');
@@ -70,10 +70,10 @@ describe('createGeminiRecipeParser', () => {
     }
   });
 
-  it('gives up after a second 503 rather than retrying indefinitely', async () => {
+  it('gives up after the last attempt rather than retrying indefinitely', async () => {
     vi.useFakeTimers();
     try {
-      const fetchImpl = makeFetch([geminiResponse(503), geminiResponse(503)]);
+      const fetchImpl = makeFetch([geminiResponse(503), geminiResponse(503), geminiResponse(503)]);
       const parser = createGeminiRecipeParser(CONFIG, fetchImpl);
 
       const resultPromise = parser.parse(CAPTION);
@@ -82,9 +82,25 @@ describe('createGeminiRecipeParser', () => {
         code: 'upstream_error',
         message: expect.stringContaining('503'),
       });
-      await vi.advanceTimersByTimeAsync(GEMINI_RETRY_DELAY_MS);
+      await vi.runAllTimersAsync();
       await rejection;
 
+      expect(fetchImpl).toHaveBeenCalledTimes(GEMINI_MAX_ATTEMPTS);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a per-minute 429 instead of failing the import', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([geminiResponse(429), geminiResponse(200)]);
+      const parser = createGeminiRecipeParser(CONFIG, fetchImpl);
+
+      const resultPromise = parser.parse(CAPTION);
+      await vi.runAllTimersAsync();
+
+      expect((await resultPromise).title).toBe('Pancakes');
       expect(fetchImpl).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

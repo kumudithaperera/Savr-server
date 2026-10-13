@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGeminiVideoParser } from './gemini-video.js';
+import { GEMINI_MAX_ATTEMPTS } from '../lib/geminiFetch.js';
 import type { ParsedRecipe } from '../lib/types.js';
 
 const CONFIG = { geminiApiKey: 'test-key', geminiVideoModel: 'gemini-2.5-flash' };
@@ -62,6 +63,13 @@ function makeFetch(generateContentResponses: Response[]): typeof fetch {
 }
 
 describe('createGeminiVideoParser', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('succeeds on the first attempt without retrying', async () => {
     const fetchImpl = makeFetch([geminiResponse(200)]);
     const parser = createGeminiVideoParser(CONFIG, fetchImpl);
@@ -73,23 +81,27 @@ describe('createGeminiVideoParser', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it('retries once after a 503 and succeeds', async () => {
+  it('retries after a 503 and succeeds', async () => {
     const fetchImpl = makeFetch([geminiResponse(503), geminiResponse(200)]);
     const parser = createGeminiVideoParser(CONFIG, fetchImpl);
 
-    const result = await parser.parseVideo(VIDEO_URL);
+    const resultPromise = parser.parseVideo(VIDEO_URL);
+    await vi.runAllTimersAsync();
 
-    expect(result.title).toBe('Pancakes');
+    expect((await resultPromise).title).toBe('Pancakes');
     expect(fetchImpl).toHaveBeenCalledTimes(3);
-  }, 10000);
+  });
 
-  it('gives up after a second 503 rather than retrying indefinitely', async () => {
-    const fetchImpl = makeFetch([geminiResponse(503), geminiResponse(503)]);
+  it('gives up after the last attempt rather than retrying indefinitely', async () => {
+    const fetchImpl = makeFetch([geminiResponse(503), geminiResponse(503), geminiResponse(503)]);
     const parser = createGeminiVideoParser(CONFIG, fetchImpl);
 
-    await expect(parser.parseVideo(VIDEO_URL)).rejects.toThrow(/503/);
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-  }, 10000);
+    const rejection = expect(parser.parseVideo(VIDEO_URL)).rejects.toThrow(/503/);
+    await vi.runAllTimersAsync();
+    await rejection;
+    // 1 call for the video download + one per attempt.
+    expect(fetchImpl).toHaveBeenCalledTimes(1 + GEMINI_MAX_ATTEMPTS);
+  });
 
   it('does not retry a non-503 error', async () => {
     const fetchImpl = makeFetch([geminiResponse(500)]);

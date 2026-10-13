@@ -1,6 +1,6 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
-import { thinkingOff } from '../lib/geminiFetch.js';
+import { generateContentWithRetry, thinkingOff } from '../lib/geminiFetch.js';
 import type {
   AdjustmentInput,
   AdjustmentResult,
@@ -198,6 +198,7 @@ function recipeToPrompt(recipe: RecipeInput): string {
 export function createGeminiRecipeImprover(
   config: Pick<Config, 'geminiApiKey' | 'geminiModel'>,
   fetchImpl: typeof fetch = fetch,
+  retryDelayMs?: number,
 ): RecipeImprover {
   async function callGemini(
     systemPrompt: string,
@@ -208,25 +209,21 @@ export function createGeminiRecipeImprover(
       `https://generativelanguage.googleapis.com/v1beta/models/` +
       `${config.geminiModel}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`;
 
-    let response: Response;
-    try {
-      response = await fetchImpl(endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ role: 'user', parts: [{ text: userText }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema,
-            temperature: 0.4,
-            ...thinkingOff(config.geminiModel),
-          },
-        }),
-      });
-    } catch (err) {
-      throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
-    }
+    const response = await generateContentWithRetry(
+      endpoint,
+      JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userText }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema,
+          temperature: 0.4,
+          ...thinkingOff(config.geminiModel),
+        },
+      }),
+      fetchImpl,
+      retryDelayMs,
+    );
 
     if (!response.ok) {
       throw upstreamError(`Gemini returned HTTP ${response.status}.`);

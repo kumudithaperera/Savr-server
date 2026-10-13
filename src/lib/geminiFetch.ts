@@ -1,11 +1,38 @@
 import { upstreamError } from './errors.js';
 
+/** Base wait before the first retry; each later retry doubles it. */
 export const GEMINI_RETRY_DELAY_MS = 1500;
 
+/** Total attempts, counting the first call. */
+export const GEMINI_MAX_ATTEMPTS = 3;
+
 /**
- * POSTs to Gemini's generateContent, retrying once on a 503. Gemini's own
- * error body calls this "high demand... usually temporary" - worth one retry
- * before the caller surfaces the error. Network failures and every other
+ * A 429 whose RetryInfo asks for longer than this is a spent daily quota, not
+ * a per-minute burst - waiting a few seconds won't help, so it isn't retried.
+ */
+export const GEMINI_MAX_RETRY_AFTER_MS = 10_000;
+
+/** Statuses worth retrying: per-minute rate limit (429) and "high demand" (503). */
+const RETRYABLE = new Set([429, 503]);
+
+/**
+ * Reads the `retryDelay` ("37s") Gemini puts in a 429's RetryInfo detail.
+ * Returns undefined when the body carries none.
+ */
+export function parseRetryDelayMs(body: string): number | undefined {
+  const match = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  return match ? Number(match[1]) * 1000 : undefined;
+}
+
+/**
+ * POSTs to Gemini's generateContent, retrying a 429 or 503 up to
+ * GEMINI_MAX_ATTEMPTS times with jittered exponential backoff.
+ *
+ * Gemini's free-tier RPM is per project, so a burst of users trips it
+ * together; it refills within the minute, so a short wait turns a failed
+ * import (and a wasted, already-billed Apify scrape) into added latency
+ * (MORSE-78). A 429 that asks to wait longer than GEMINI_MAX_RETRY_AFTER_MS is
+ * a spent daily quota and returns at once. Network failures and every other
  * status pass straight through without retrying.
  */
 export async function generateContentWithRetry(
@@ -26,11 +53,25 @@ export async function generateContentWithRetry(
       throw upstreamError(`Could not reach Gemini: ${(err as Error).message}`);
     }
 
-    if (response.status !== 503 || attempt >= 2) {
+    if (!RETRYABLE.has(response.status) || attempt >= GEMINI_MAX_ATTEMPTS) {
       return response;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    // Jitter spreads a burst of callers out so they don't all retry in step.
+    let delayMs = retryDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.5);
+
+    if (response.status === 429) {
+      // The body has to be read to see RetryInfo; hand back an equivalent
+      // Response so a caller that gives up can still read it.
+      const text = await response.text().catch(() => '');
+      const retryAfterMs = parseRetryDelayMs(text);
+      if (retryAfterMs !== undefined && retryAfterMs > GEMINI_MAX_RETRY_AFTER_MS) {
+        return new Response(text, { status: response.status });
+      }
+      if (retryAfterMs !== undefined) delayMs = Math.max(delayMs, retryAfterMs);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }
 
