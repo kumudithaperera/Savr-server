@@ -40,11 +40,12 @@ const PROTECTED_PATHS = new Set([
 ]);
 
 /**
- * Path prefixes protected exactly like `PROTECTED_PATHS`. The ideas board has
- * ids in its paths (`/community/posts/<uuid>/vote`), so it can't be listed
- * path by path.
+ * Path prefixes protected exactly like `PROTECTED_PATHS`. The ideas board, the
+ * recipe feed and Discover have ids in their paths
+ * (`/community/posts/<uuid>/vote`, `/discover/items/<uuid>/save`), so they
+ * can't be listed path by path.
  */
-const PROTECTED_PREFIXES = ['/community/'];
+const PROTECTED_PREFIXES = ['/community/', '/discover/'];
 
 function isProtected(path: string): boolean {
   return PROTECTED_PATHS.has(path) || PROTECTED_PREFIXES.some((prefix) => path.startsWith(prefix));

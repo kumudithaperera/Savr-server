@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import type {
@@ -11,8 +9,8 @@ import type {
   TargetType,
 } from '../lib/community-db.js';
 import { TEAM_AUTHOR_HASH } from '../lib/community-seed.js';
+import { asBody, cleanText, createCommunityIdentity, requireUuid } from '../lib/community-kit.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
-import { deviceIdOf } from '../lib/grants.js';
 import type { Store } from '../lib/store.js';
 import { localCheck, type ContentModerator } from '../services/moderation.js';
 
@@ -78,8 +76,6 @@ const TABS: Record<string, { statuses: PostStatus[]; sorts: ('top' | 'new' | 'sh
   shipped: { statuses: ['shipped'], sorts: ['shipped'] },
 };
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // --- DTOs (the only shapes that leave the server) ----------------------------
 
 export interface PostDto {
@@ -143,28 +139,6 @@ function toCommentDtos(post: PostRow, rows: CommentRow[], me: string | null): Co
   });
 }
 
-// --- input helpers ----------------------------------------------------------
-
-/** Trims, normalises newlines, strips control characters, collapses blank runs. */
-function cleanText(raw: unknown, { singleLine }: { singleLine: boolean }): string {
-  if (typeof raw !== 'string') return '';
-  let text = raw.replace(/\r\n?/g, '\n');
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/[\u0000-\u0008\u000B-\u001F\u007F​-‏‪-‮]/g, '');
-  text = singleLine ? text.replace(/\s+/g, ' ') : text.replace(/\n{3,}/g, '\n\n');
-  return text.trim();
-}
-
-function requireUuid(value: unknown, what: string): string {
-  if (typeof value !== 'string' || !UUID.test(value)) throw badRequest(`Invalid ${what}.`);
-  return value.toLowerCase();
-}
-
-function asBody(request: FastifyRequest): Record<string, unknown> {
-  const body = request.body;
-  return body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
-}
-
 const rejected = () =>
   new HttpError(422, 'content_rejected', "This doesn't meet our community rules.");
 const notFound = () => new HttpError(404, 'not_found', 'This idea is no longer available.');
@@ -172,15 +146,7 @@ const notFound = () => new HttpError(404, 'not_found', 'This idea is no longer a
 export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOptions): void {
   const { db, store, moderator } = deps;
 
-  function hashOf(deviceId: string): string {
-    return createHash('sha256').update(`${deps.hashPepper}:${deviceId}`).digest('hex');
-  }
-
-  /** The caller's author hash, or null when the app sent no device id. */
-  function callerOf(request: FastifyRequest): string | null {
-    const deviceId = deviceIdOf(request);
-    return deviceId === 'unknown' ? null : hashOf(deviceId);
-  }
+  const { callerOf } = createCommunityIdentity(deps.hashPepper);
 
   function ensureConfigured(): void {
     if (!db.configured) {

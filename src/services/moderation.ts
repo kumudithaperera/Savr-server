@@ -26,9 +26,15 @@ export type ModerationVerdict =
       category: string;
     };
 
+/**
+ * What is being judged. `post`/`comment` are the ideas board; `recipe` and
+ * `suggestion` are the community recipe feed, which gets its own prompt.
+ */
+export type ModerationKind = 'post' | 'comment' | 'recipe' | 'suggestion';
+
 export interface ContentModerator {
   /** Throws (upstream error) when the check could not run. The caller decides fail-open/closed. */
-  review(text: string, kind: 'post' | 'comment'): Promise<ModerationVerdict>;
+  review(text: string, kind: ModerationKind): Promise<ModerationVerdict>;
 }
 
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
@@ -43,6 +49,20 @@ export function localCheck(text: string): ModerationVerdict {
   if (PHONE_PATTERN.test(text)) return { allowed: false, category: 'personal_info' };
   const links = text.match(URL_PATTERN) ?? [];
   if (links.length > 1) return { allowed: false, category: 'spam' };
+  return { allowed: true };
+}
+
+/**
+ * `localCheck` for the body of a shared recipe (ingredients and steps). Those
+ * are full of numbers and are often scraped from a blog, so the phone-number
+ * and single-link rules would reject ordinary recipes; contact details by email
+ * and link farms are still refused. The parts a person types themselves (title,
+ * note, display name) still go through the full `localCheck`.
+ */
+export function recipeBodyCheck(text: string): ModerationVerdict {
+  if (EMAIL_PATTERN.test(text)) return { allowed: false, category: 'personal_info' };
+  const links = text.match(URL_PATTERN) ?? [];
+  if (links.length > 2) return { allowed: false, category: 'spam' };
   return { allowed: true };
 }
 
@@ -90,6 +110,29 @@ Allow (verdict "allow", category "none") everything else, including:
 
 When unsure, allow: other users can still report it.`;
 
+const RECIPE_MODERATION_PROMPT = `You moderate a public recipe-sharing feed inside Morsel, a recipe-saving app. People share recipes (a display name, a title, an optional note, ingredients and steps) and suggest improvements to each other's recipes. Nobody follows anyone; it is a shared cookbook, not a social network.
+
+Decide whether the text may be published. Return JSON only, matching the schema.
+
+Reject (verdict "reject") when the text contains:
+- hate: attacks or slurs targeting a protected group, including in the display name or title
+- harassment: insults, threats or bullying aimed at a person
+- sexual: sexual or sexually suggestive content
+- violence: threats or glorification of violence
+- self_harm: encouragement of self-harm, suicide or eating disorders (e.g. pro-starvation "recipes")
+- personal_info: someone's contact details, address or other identifying information
+- spam: advertising, promotion, referral or affiliate links, scams, or content that is plainly not a recipe or a cooking suggestion
+- illegal: recipes or instructions for drugs, poisons, or anything clearly dangerous to eat (e.g. raw toxic ingredients presented as safe)
+
+Allow (verdict "allow", category "none") everything else, including:
+- recipes with alcohol, meat, offal, or ingredients some cultures avoid
+- blunt feedback on a recipe ("too salty, halve the soy sauce")
+- recipes copied from a blog or social post, with or without a credit link
+- any language other than English
+- a display name that is an ordinary first name, nickname or pseudonym
+
+When unsure, allow: other users can still report it.`;
+
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
 }
@@ -108,7 +151,11 @@ export function createGeminiModerator(
       const response = await generateContentWithRetry(
         endpoint,
         JSON.stringify({
-          systemInstruction: { parts: [{ text: MODERATION_PROMPT }] },
+          systemInstruction: {
+            parts: [
+              { text: kind === 'recipe' || kind === 'suggestion' ? RECIPE_MODERATION_PROMPT : MODERATION_PROMPT },
+            ],
+          },
           contents: [
             {
               role: 'user',

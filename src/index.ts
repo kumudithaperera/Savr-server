@@ -1,6 +1,10 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createMemoryCommunityDb, createSupabaseCommunityDb } from './lib/community-db.js';
+import { createMemoryDiscoverDb, createSupabaseDiscoverDb } from './lib/discover-db.js';
+import { createMemoryRecipeFeedDb, createSupabaseRecipeFeedDb } from './lib/recipe-feed-db.js';
+import { createGeminiClassifier } from './services/classify.js';
+import { createPassthroughRehoster, createSupabaseImageRehoster } from './services/rehost.js';
 import { SEED_POSTS } from './lib/community-seed.js';
 import { createStore } from './lib/store.js';
 import { createSupabase } from './lib/supabase.js';
@@ -19,6 +23,9 @@ import { createWebScraper } from './services/web.js';
 const config = loadConfig();
 
 const store = createStore({ upstashUrl: config.upstashUrl, upstashToken: config.upstashToken });
+
+const serviceRole = { url: config.supabaseUrl, serviceRoleKey: config.supabaseServiceRoleKey };
+const discoverInMemory = config.discoverDb === 'memory';
 
 const app = buildApp({
   instagramScraper: createApifyInstagramScraper(config),
@@ -56,6 +63,15 @@ const app = buildApp({
         }),
   moderator: createGeminiModerator(config),
   communityHashPepper: config.communityHashPepper,
+  discoverDb: discoverInMemory ? createMemoryDiscoverDb() : createSupabaseDiscoverDb(serviceRole),
+  recipeFeedDb: discoverInMemory ? createMemoryRecipeFeedDb() : createSupabaseRecipeFeedDb(serviceRole),
+  classifier: createGeminiClassifier(config),
+  rehoster:
+    discoverInMemory || !config.supabaseServiceRoleKey
+      ? createPassthroughRehoster()
+      : createSupabaseImageRehoster({ ...serviceRole, bucket: config.communityImageBucket }),
+  globalDailyClassifyLimit: config.globalDailyClassifyLimit,
+  discoverSweepMs: 30 * 60 * 1000,
   limits: {
     monthlyDeviceExtractionLimit: config.monthlyDeviceExtractionLimit,
     plusDeviceExtractionLimit: config.plusDeviceExtractionLimit,
@@ -126,6 +142,14 @@ if (config.communityDb === 'memory') {
   app.log.warn(
     'Supabase service role is unset - the ideas board (/community/*) answers 503. Set SUPABASE_URL and ' +
       'SUPABASE_SERVICE_ROLE_KEY and run supabase/003_community.sql, or COMMUNITY_DB=memory locally.',
+  );
+}
+if (discoverInMemory) {
+  app.log.warn('DISCOVER_DB=memory - Discover and community recipes are in-process and wiped on every restart. Local dev only.');
+} else if (!config.supabaseUrl || !config.supabaseServiceRoleKey) {
+  app.log.warn(
+    'Supabase service role is unset - Discover (/discover/*) and community recipes (/community/recipes) answer 503 ' +
+      'and nothing is indexed. Run supabase/005_discover.sql, or DISCOVER_DB=memory locally.',
   );
 }
 if (!config.communityHashPepper) {

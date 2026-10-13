@@ -202,6 +202,22 @@ export interface Config {
    * the board answers 503 rather than accepting posts into nowhere.
    */
   communityDb: 'supabase' | 'memory';
+  /**
+   * `memory` runs Discover and the community recipe feed in-process for local
+   * dev (lost on restart). Anything else uses Supabase (`005_discover.sql`).
+   */
+  discoverDb: 'supabase' | 'memory';
+  /**
+   * Public Supabase Storage bucket that expiring Instagram/TikTok photos are
+   * copied into for Discover and shared posts (`services/rehost.ts`).
+   */
+  communityImageBucket: string;
+  /**
+   * Service-wide AI classify calls per day (diet tags / time / difficulty for
+   * Discover and the recipe feed). Its own budget so indexing can never eat
+   * the `/improve` allowance users see.
+   */
+  globalDailyClassifyLimit: number;
 }
 
 /** Reads a positive integer env var, falling back when unset or malformed. */
@@ -280,5 +296,8 @@ export function loadConfig(): Config {
     revenueCatEntitlementId: process.env.REVENUECAT_ENTITLEMENT_ID ?? 'Morsel Plus',
     communityHashPepper: process.env.COMMUNITY_HASH_PEPPER ?? '',
     communityDb: process.env.COMMUNITY_DB === 'memory' ? 'memory' : 'supabase',
+    discoverDb: process.env.DISCOVER_DB === 'memory' ? 'memory' : 'supabase',
+    communityImageBucket: process.env.COMMUNITY_IMAGE_BUCKET ?? 'community-images',
+    globalDailyClassifyLimit: numberFromEnv('GLOBAL_DAILY_CLASSIFY_LIMIT', 300),
   };
 }

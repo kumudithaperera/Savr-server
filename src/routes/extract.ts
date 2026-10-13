@@ -15,6 +15,7 @@ import { deviceIdOf } from '../lib/grants.js';
 import { mergeRecipes } from '../lib/merge.js';
 import { normalizeRecipe } from '../lib/normalize.js';
 import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, dayKey, monthKey } from '../lib/period.js';
+import type { DiscoverIndexer } from '../lib/discover-indexer.js';
 import type { Store } from '../lib/store.js';
 import type { Supabase } from '../lib/supabase.js';
 import type { ExtractedRecipe, ParsedRecipe, ScrapedPost } from '../lib/types.js';
@@ -52,6 +53,8 @@ interface ExtractDeps {
   limits: ExtractLimits;
   /** Subscription lookup behind the cap; unconfigured = redeem codes only. */
   supabase: Supabase;
+  /** Copies each fresh extraction into Discover's search index. Absent = off. */
+  indexer?: DiscoverIndexer;
 }
 
 /** Picks the scraper for a link's origin. */
@@ -93,7 +96,7 @@ const EXTRACT_VERSION = 'v2';
  * Cache key for a canonical post identity (see `canonicalCacheKey`). Hashed to
  * keep keys short and opaque.
  */
-function cacheKey(canonical: string): string {
+export function cacheKey(canonical: string): string {
   const versioned = `${EXTRACT_VERSION}:${canonical}`;
   return `cache:extract:${createHash('sha256').update(versioned).digest('hex')}`;
 }
@@ -483,6 +486,11 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     if (alias && alias !== canonical) {
       await store.setJson(cacheKey(alias), recipe, cacheTtlSeconds);
     }
+
+    // Discover: make this extraction searchable for everyone. Fire-and-forget -
+    // indexing (and its classify call) must never slow down or fail the
+    // response. The platform id beats a short link's path as the identity.
+    void deps.indexer?.index(alias ?? canonical, recipe, scraped.ownerUsername, request.log);
     // Charged only on success, so a failed extraction never burns an allowance.
     // The global counter above is incremented up front instead, because a failed
     // attempt still costs us money upstream.

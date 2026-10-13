@@ -14,9 +14,16 @@ import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
 import { createStore, type Store } from './lib/store.js';
 import { createUnconfiguredCommunityDb, type CommunityDb } from './lib/community-db.js';
+import { createUnconfiguredDiscoverDb, type DiscoverDb } from './lib/discover-db.js';
+import { createDiscoverIndexer } from './lib/discover-indexer.js';
+import { createUnconfiguredRecipeFeedDb, type RecipeFeedDb } from './lib/recipe-feed-db.js';
+import type { RecipeClassifier } from './services/classify.js';
+import { createPassthroughRehoster, type ImageRehoster } from './services/rehost.js';
 import { createSupabase, type Supabase } from './lib/supabase.js';
 import { registerAccountRoute } from './routes/account.js';
 import { registerCommunityRoutes } from './routes/community.js';
+import { registerDiscoverRoutes } from './routes/discover.js';
+import { registerRecipeFeedRoutes } from './routes/recipe-feed.js';
 import { registerExtractRoute, statsKey, fallbackStatsKey, deepseekStatsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
@@ -34,6 +41,9 @@ const DEFAULT_LIMITS: ExtractLimits = {
 
 /** Same, for the `/improve` daily ceiling. See `config.ts` for the sizing. */
 const DEFAULT_GLOBAL_DAILY_IMPROVE_LIMIT = 150;
+
+/** Same, for the Discover / recipe-feed classify ceiling. See `config.ts`. */
+const DEFAULT_GLOBAL_DAILY_CLASSIFY_LIMIT = 300;
 
 /** No codes issued by default, so tests can't accidentally redeem one. */
 const DEFAULT_REDEEM: RedeemOptions = { plusRedeemCodes: [], plusGrantDays: 0 };
@@ -91,6 +101,18 @@ export interface AppDeps {
   moderator?: ContentModerator;
   /** Server-only pepper for board author hashes. See `routes/community.ts`. */
   communityHashPepper?: string;
+  /** Discover's search index. Omitted = unconfigured (503, and nothing is indexed). */
+  discoverDb?: DiscoverDb;
+  /** Community recipe feed storage. Omitted = unconfigured (503). */
+  recipeFeedDb?: RecipeFeedDb;
+  /** Diet/time/difficulty tagging. Omitted = recipes stay untagged. */
+  classifier?: RecipeClassifier;
+  /** Copies expiring CDN photos to our bucket. Omitted = URLs kept as-is. */
+  rehoster?: ImageRehoster;
+  /** Service-wide classify calls per day. */
+  globalDailyClassifyLimit?: number;
+  /** How often to retry classifying untagged Discover rows. Omitted = never. */
+  discoverSweepMs?: number;
 }
 
 /**
@@ -180,7 +202,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     };
   });
 
-  registerExtractRoute(app, { ...deps, store, limits, supabase });
+  const discoverDb = deps.discoverDb ?? createUnconfiguredDiscoverDb();
+  const communityDb = deps.communityDb ?? createUnconfiguredCommunityDb();
+  const rehoster = deps.rehoster ?? createPassthroughRehoster();
+  const classifyBudget = {
+    store,
+    classifier: deps.classifier,
+    dailyClassifyLimit: deps.globalDailyClassifyLimit ?? DEFAULT_GLOBAL_DAILY_CLASSIFY_LIMIT,
+  };
+  const indexer = createDiscoverIndexer({ ...classifyBudget, db: discoverDb, rehoster });
+  // Retry classification for rows that missed it (over budget, Gemini blip,
+  // backfilled). Production only - tests never pass an interval.
+  if (deps.discoverSweepMs) {
+    const timer = setInterval(() => void indexer.sweep(20, app.log), deps.discoverSweepMs);
+    timer.unref();
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
+
+  registerExtractRoute(app, { ...deps, store, limits, supabase, indexer });
   registerImproveRoute(app, {
     ...deps,
     store,
@@ -191,9 +230,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerRedeemRoute(app, { store, supabase, redeem: deps.redeem ?? DEFAULT_REDEEM });
   registerAccountRoute(app, { supabase });
   registerCommunityRoutes(app, {
-    db: deps.communityDb ?? createUnconfiguredCommunityDb(),
+    db: communityDb,
     store,
     moderator: deps.moderator,
+    hashPepper: deps.communityHashPepper ?? '',
+  });
+  registerDiscoverRoutes(app, {
+    db: discoverDb,
+    communityDb,
+    store,
+    hashPepper: deps.communityHashPepper ?? '',
+  });
+  registerRecipeFeedRoutes(app, {
+    ...classifyBudget,
+    db: deps.recipeFeedDb ?? createUnconfiguredRecipeFeedDb(),
+    communityDb,
+    moderator: deps.moderator,
+    rehoster,
+    photoSearch: deps.photoSearch,
     hashPepper: deps.communityHashPepper ?? '',
   });
   registerRevenueCatWebhook(app, {

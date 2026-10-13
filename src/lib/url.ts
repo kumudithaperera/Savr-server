@@ -205,3 +205,69 @@ export function cacheKeyFromShortcode(
   if (platform === 'tiktok') return `tt:${shortcode}`;
   return null;
 }
+
+/**
+ * Query parameters a *published* web link may keep. Discover and the recipe
+ * feed show source links to everyone, and a web link's query string is where
+ * private things live (`?token=`, `?session=`, a signed preview URL). So the
+ * rule is an allowlist, not a denylist: a link whose query keeps anything else
+ * is never indexed, and a shared post's link loses its query instead.
+ */
+const PUBLIC_QUERY_PARAMS = new Set(['p', 'page_id', 'recipe', 'recipe_id', 'id', 'r']);
+
+/**
+ * The link we show the world for a post, rebuilt from its canonical identity
+ * (`canonicalCacheKey`) rather than from whatever link the first person
+ * pasted: that link can carry their `igsh` share id or tracking params, which
+ * identify the sharer. Null = not publishable (unknown shape, or a web link
+ * with a non-allowlisted query param).
+ */
+export function publicSourceUrl(canonical: string, creator?: string | null): string | null {
+  if (canonical.startsWith('ig:')) {
+    const code = canonical.slice(3);
+    return /^[A-Za-z0-9_-]+$/.test(code) ? `https://www.instagram.com/p/${code}/` : null;
+  }
+  if (canonical.startsWith('tt:short:')) {
+    const path = canonical.slice('tt:short:'.length);
+    return /^\/[A-Za-z0-9_-]+$/.test(path) ? `https://vm.tiktok.com${path}/` : null;
+  }
+  if (canonical.startsWith('tt:')) {
+    const id = canonical.slice(3);
+    if (!/^\d+$/.test(id)) return null;
+    const user = creator && /^[A-Za-z0-9._]+$/.test(creator) ? creator : '';
+    return `https://www.tiktok.com/@${user}/video/${id}`;
+  }
+  if (canonical.startsWith('web:')) {
+    let parsed: URL;
+    try {
+      parsed = new URL(`https://${canonical.slice(4)}`);
+    } catch {
+      return null;
+    }
+    for (const name of parsed.searchParams.keys()) {
+      if (!PUBLIC_QUERY_PARAMS.has(name)) return null;
+    }
+    return parsed.toString();
+  }
+  return null;
+}
+
+/**
+ * A link someone shared to the recipe feed, cleaned for publication. Same as
+ * `publicSourceUrl`, except a web link with a private-looking query keeps its
+ * page (host + path) rather than being refused - the post itself is the
+ * person's choice to share, only the query is the risk.
+ */
+export function publicShareUrl(url: string, platform: SourcePlatform): string | null {
+  const canonical = canonicalCacheKey(url, platform);
+  const direct = publicSourceUrl(canonical);
+  if (direct) return direct;
+  if (!canonical.startsWith('web:')) return null;
+  try {
+    const parsed = new URL(`https://${canonical.slice(4)}`);
+    parsed.search = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
