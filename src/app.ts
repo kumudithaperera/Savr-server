@@ -215,7 +215,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // backfilled). Production only - tests never pass an interval.
   if (deps.discoverSweepMs) {
     const timer = setInterval(() => void indexer.sweep(20, app.log), deps.discoverSweepMs);
-    timer.unref();
+    // Don't hold the process open for it (Node's Timeout; typed loosely so
+    // the app's DOM-typed tsc pass over this file agrees).
+    (timer as { unref?: () => void }).unref?.();
     app.addHook('onClose', async () => clearInterval(timer));
   }
 
