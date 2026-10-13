@@ -8,7 +8,10 @@ import type { RecipeParser } from '../services/gemini.js';
 import type { VideoRecipeParser } from '../services/gemini-video.js';
 import type { TikTokScraper } from '../services/tiktok.js';
 import type { WebScraper } from '../services/web.js';
+import { negativeExtractKey } from '../lib/ai-cache.js';
+import { countAi } from '../lib/ai-stats.js';
 import { assessCaption, assessCompleteness } from '../lib/completeness.js';
+import { facetsFromParsed } from '../lib/facet-rules.js';
 import { resolveEntitlement } from '../lib/entitlement.js';
 import { HttpError, atCapacity, quotaExceeded, unprocessable } from '../lib/errors.js';
 import { deviceIdOf } from '../lib/grants.js';
@@ -101,6 +104,12 @@ export function cacheKey(canonical: string): string {
   return `cache:extract:${createHash('sha256').update(versioned).digest('hex')}`;
 }
 
+/**
+ * How long a link that held no recipe keeps failing fast. Short, because a
+ * creator can still edit a caption to add the recipe.
+ */
+const NEGATIVE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 /** Monthly cache hit/miss counters, so the cache's payoff is measurable. */
 const STATS_TTL_SECONDS = 60 * 24 * 60 * 60;
 export const statsKey = (kind: 'hit' | 'miss', now: Date) =>
@@ -138,6 +147,7 @@ async function tryDeepSeekExtraction(
   }
 
   await store.incrWithTtl(deepseekStatsKey('triggered', now), STATS_TTL_SECONDS);
+  await countAi(store, 'deepseek');
   request.log.info({}, 'triggering DeepSeek text extraction (Level 1)');
 
   try {
@@ -208,6 +218,7 @@ async function tryVideoFallback(
   }
 
   await store.incrWithTtl(fallbackStatsKey('triggered', now), STATS_TTL_SECONDS);
+  await countAi(store, 'geminiVideo');
   request.log.info({ videoUrl: scraped.videoUrl }, 'triggering video fallback extraction');
 
   try {
@@ -277,6 +288,13 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
     }
     await store.incrWithTtl(statsKey('miss', now), STATS_TTL_SECONDS);
 
+    const known = await store.getJson<{ message: string }>(negativeExtractKey(canonical));
+    if (known) {
+      request.log.info({ canonical }, 'extract: known non-recipe served from negative cache');
+      await countAi(store, 'extractNegativeHit');
+      throw unprocessable(known.message, 'not_a_recipe');
+    }
+
     const metered = isMetered(platform);
     const deviceId = deviceIdOf(request);
 
@@ -314,190 +332,222 @@ export function registerExtractRoute(app: FastifyInstance, deps: ExtractDeps): v
       }
     }
 
-    const scraped = await scraperFor(platform, deps).scrape(url);
+    // A link that already turned out not to hold a recipe fails the same way
+    // again for a week without re-running up to three model calls.
+    try {
+      const scraped = await scraperFor(platform, deps).scrape(url);
 
-    // =========================================================================
-    // THREE-LEVEL EXTRACTION ARCHITECTURE
-    // Level 1: DeepSeek text analysis (cheap, tried first to hold down Gemini usage)
-    // Level 2: Gemini text parse (if DeepSeek is unavailable or insufficient)
-    // Level 3: Gemini video fallback (expensive, if Level 1+2 insufficient)
-    //
-    // A caption already known to be unusable (empty, or just hashtags/emoji -
-    // `assessCaption`) skips straight to Level 3 when a video exists: apify/
-    // tiktok have already rejected the no-video case outright, so spending two
-    // text-LLM calls that can't succeed only delays the call that can.
-    // =========================================================================
+      // =========================================================================
+      // THREE-LEVEL EXTRACTION ARCHITECTURE
+      // Level 1: DeepSeek text analysis (cheap, tried first to hold down Gemini usage)
+      // Level 2: Gemini text parse (if DeepSeek is unavailable or insufficient)
+      // Level 3: Gemini video fallback (expensive, if Level 1+2 insufficient)
+      //
+      // A caption already known to be unusable (empty, or just hashtags/emoji -
+      // `assessCaption`) skips straight to Level 3 when a video exists: apify/
+      // tiktok have already rejected the no-video case outright, so spending two
+      // text-LLM calls that can't succeed only delays the call that can.
+      // =========================================================================
 
-    const captionVerdict = assessCaption(scraped.caption);
-    // Only worth skipping the text levels when there's a video to fall back on -
-    // otherwise a known-bad caption still deserves a shot from both text parsers
-    // (the isRecipe flag is the real backstop for junk), since throwing outright
-    // with no video is strictly worse than trying and failing.
-    const skipTextLevels = captionVerdict !== 'ok' && Boolean(scraped.videoUrl);
+      const captionVerdict = assessCaption(scraped.caption);
+      // Only worth skipping the text levels when there's a video to fall back on -
+      // otherwise a known-bad caption still deserves a shot from both text parsers
+      // (the isRecipe flag is the real backstop for junk), since throwing outright
+      // with no video is strictly worse than trying and failing.
+      //
+      // A blog's complete JSON-LD (macros included) is used as-is: no model call.
+      const structured = scraped.structured ?? null;
+      if (structured) {
+        request.log.info({}, 'complete JSON-LD recipe - skipping every AI level');
+        await countAi(store, 'jsonLdParse');
+      }
+      const skipTextLevels = Boolean(structured) || (captionVerdict !== 'ok' && Boolean(scraped.videoUrl));
 
-    let primaryParsed: ParsedRecipe | null = null;
-    let primaryError: Error | null = null;
-    let deepseekResult: DeepSeekResult | null = null;
+      let primaryParsed: ParsedRecipe | null = null;
+      let primaryError: Error | null = null;
+      let deepseekResult: DeepSeekResult | null = null;
 
-    if (skipTextLevels) {
-      request.log.info(
-        { captionVerdict },
-        'caption already known-bad - skipping Levels 1-2, going straight to Level 3 video',
-      );
-    } else {
-      // LEVEL 1: DeepSeek text analysis - cheap, tried first.
-      if (scraped.caption.trim()) {
-        deepseekResult = await tryDeepSeekExtraction(deps, scraped, null, request, now, store);
+      if (structured) {
+        // nothing to parse
+      } else if (skipTextLevels) {
+        request.log.info(
+          { captionVerdict },
+          'caption already known-bad - skipping Levels 1-2, going straight to Level 3 video',
+        );
       } else {
-        request.log.info({}, 'Level 1: no caption available');
+        // LEVEL 1: DeepSeek text analysis - cheap, tried first.
+        if (scraped.caption.trim()) {
+          deepseekResult = await tryDeepSeekExtraction(deps, scraped, null, request, now, store);
+        } else {
+          request.log.info({}, 'Level 1: no caption available');
+        }
       }
-    }
 
-    const level1Sufficient = Boolean(
-      deepseekResult?.sufficient && deepseekResult.recipe.isRecipe !== false,
-    );
-    if (level1Sufficient && deepseekResult) {
-      request.log.info(
-        { confidence: deepseekResult.confidence },
-        'Level 1 (DeepSeek) extraction sufficient - stopping',
+      const level1Sufficient = Boolean(
+        deepseekResult?.sufficient && deepseekResult.recipe.isRecipe !== false,
       );
-    }
-
-    // LEVEL 2: Gemini text parse - only spent when DeepSeek couldn't close it
-    // out (or isn't configured), and only when the caption wasn't already
-    // known-bad with a video to fall back on instead.
-    if (!level1Sufficient && !skipTextLevels && scraped.caption.trim()) {
-      try {
-        primaryParsed = await deps.parser.parse(scraped.caption);
-      } catch (err) {
-        primaryError = err as Error;
+      if (level1Sufficient && deepseekResult) {
         request.log.info(
-          { error: primaryError.message },
-          'Level 2 (Gemini text) extraction failed',
+          { confidence: deepseekResult.confidence },
+          'Level 1 (DeepSeek) extraction sufficient - stopping',
         );
       }
-    }
 
-    let level2Sufficient = false;
-    if (!level1Sufficient && primaryParsed && primaryParsed.isRecipe !== false) {
-      const completeness = assessCompleteness(scraped, primaryParsed);
-      level2Sufficient = completeness.isComplete && completeness.confidence >= 0.6;
-      if (level2Sufficient) {
-        request.log.info(
-          {
-            confidence: completeness.confidence,
-            ingredientCount: completeness.details.ingredientCount,
-            stepCount: completeness.details.stepCount,
-          },
-          'Level 2 (Gemini text) extraction sufficient - stopping',
-        );
-      }
-    }
-
-    let finalParsed: ParsedRecipe;
-
-    if (level1Sufficient && deepseekResult) {
-      finalParsed = deepseekResult.recipe;
-    } else if (level2Sufficient && primaryParsed) {
-      finalParsed = primaryParsed;
-    } else {
-      // LEVEL 3: Gemini video fallback (if video URL available)
-      const needsVideo = Boolean(scraped.videoUrl);
-      let videoParsed: ParsedRecipe | null = null;
-
-      if (needsVideo) {
-        const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
-        request.log.info(
-          {
-            reason: skipTextLevels
-              ? 'caption_known_bad'
-              : primaryParsed
-                ? 'gemini_insufficient'
-                : 'no_text_result',
-          },
-          'proceeding to Level 3 (Gemini video)',
-        );
-        videoParsed = await tryVideoFallback(deps, scraped, bestTextResult, request, now, store);
+      // LEVEL 2: Gemini text parse - only spent when DeepSeek couldn't close it
+      // out (or isn't configured), and only when the caption wasn't already
+      // known-bad with a video to fall back on instead.
+      if (!level1Sufficient && !skipTextLevels && scraped.caption.trim()) {
+        try {
+          await countAi(store, 'geminiText');
+          primaryParsed = await deps.parser.parse(scraped.caption);
+        } catch (err) {
+          primaryError = err as Error;
+          request.log.info(
+            { error: primaryError.message },
+            'Level 2 (Gemini text) extraction failed',
+          );
+        }
       }
 
-      // Determine final result from all levels
-      if (videoParsed && videoParsed.isRecipe !== false) {
-        // Merge video result with best text result if both available
-        const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
-        if (bestTextResult && bestTextResult.isRecipe !== false) {
-          const merged = mergeRecipes(bestTextResult, videoParsed);
+      let level2Sufficient = false;
+      if (!level1Sufficient && primaryParsed && primaryParsed.isRecipe !== false) {
+        const completeness = assessCompleteness(scraped, primaryParsed);
+        level2Sufficient = completeness.isComplete && completeness.confidence >= 0.6;
+        if (level2Sufficient) {
           request.log.info(
             {
-              videoContributions: merged.videoContributions,
-              mergedConfidence: merged.mergedConfidence,
+              confidence: completeness.confidence,
+              ingredientCount: completeness.details.ingredientCount,
+              stepCount: completeness.details.stepCount,
             },
-            'merged text and video extraction results',
+            'Level 2 (Gemini text) extraction sufficient - stopping',
           );
-          finalParsed = merged;
-        } else {
-          finalParsed = videoParsed;
         }
-      } else if (primaryParsed && primaryParsed.isRecipe !== false) {
-        // Fall back to the Gemini text result
-        finalParsed = primaryParsed;
-      } else if (deepseekResult?.recipe && deepseekResult.recipe.isRecipe !== false) {
-        // DeepSeek had something even if not "sufficient"
-        finalParsed = deepseekResult.recipe;
-      } else {
-        // No usable result from any level
-        if (primaryError) {
-          throw primaryError;
-        }
-        throw unprocessable(
-          'Could not extract a recipe from this link. The video may not contain a recipe, ' +
-          'or the content could not be analyzed.',
-          'not_a_recipe',
-        );
       }
-    }
 
-    const recipe = normalizeRecipe(url, platform, scraped, finalParsed);
+      let finalParsed: ParsedRecipe;
 
-    // INVARIANT: only a confidently-parsed recipe is ever cached. Every rejection
-    // upstream of here throws - the link check, the caption gate in the scraper,
-    // and `isRecipe: false` in normalization - so an uncertain result can't reach
-    // this line. That matters because an entry written here is keyed on the post,
-    // lives for a year, and is then served to everyone who pastes that link: one
-    // cached guess becomes the permanent answer for that post.
-    //
-    // Defensive shape check on the wire format. normalizeRecipe sanitises and
-    // defaults every field, so this should never fail; if it does, the recipe is
-    // rejected rather than cached and served as-is.
-    const validated = validateExtractedRecipe(recipe);
-    if (!validated.success) {
-      request.log.error(
-        { url, errors: validated.errors },
-        'normalization produced an invalid ExtractedRecipe',
+      if (structured) {
+        finalParsed = structured;
+      } else if (level1Sufficient && deepseekResult) {
+        finalParsed = deepseekResult.recipe;
+      } else if (level2Sufficient && primaryParsed) {
+        finalParsed = primaryParsed;
+      } else {
+        // LEVEL 3: Gemini video fallback (if video URL available)
+        const needsVideo = Boolean(scraped.videoUrl);
+        let videoParsed: ParsedRecipe | null = null;
+
+        if (needsVideo) {
+          const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
+          request.log.info(
+            {
+              reason: skipTextLevels
+                ? 'caption_known_bad'
+                : primaryParsed
+                  ? 'gemini_insufficient'
+                  : 'no_text_result',
+            },
+            'proceeding to Level 3 (Gemini video)',
+          );
+          videoParsed = await tryVideoFallback(deps, scraped, bestTextResult, request, now, store);
+        }
+
+        // Determine final result from all levels
+        if (videoParsed && videoParsed.isRecipe !== false) {
+          // Merge video result with best text result if both available
+          const bestTextResult = primaryParsed ?? deepseekResult?.recipe ?? null;
+          if (bestTextResult && bestTextResult.isRecipe !== false) {
+            const merged = mergeRecipes(bestTextResult, videoParsed);
+            request.log.info(
+              {
+                videoContributions: merged.videoContributions,
+                mergedConfidence: merged.mergedConfidence,
+              },
+              'merged text and video extraction results',
+            );
+            finalParsed = merged;
+          } else {
+            finalParsed = videoParsed;
+          }
+        } else if (primaryParsed && primaryParsed.isRecipe !== false) {
+          // Fall back to the Gemini text result
+          finalParsed = primaryParsed;
+        } else if (deepseekResult?.recipe && deepseekResult.recipe.isRecipe !== false) {
+          // DeepSeek had something even if not "sufficient"
+          finalParsed = deepseekResult.recipe;
+        } else {
+          // No usable result from any level
+          if (primaryError) {
+            throw primaryError;
+          }
+          throw unprocessable(
+            'Could not extract a recipe from this link. The video may not contain a recipe, ' +
+            'or the content could not be analyzed.',
+            'not_a_recipe',
+          );
+        }
+      }
+
+      const recipe = normalizeRecipe(url, platform, scraped, finalParsed);
+
+      // INVARIANT: only a confidently-parsed recipe is ever cached. Every rejection
+      // upstream of here throws - the link check, the caption gate in the scraper,
+      // and `isRecipe: false` in normalization - so an uncertain result can't reach
+      // this line. That matters because an entry written here is keyed on the post,
+      // lives for a year, and is then served to everyone who pastes that link: one
+      // cached guess becomes the permanent answer for that post.
+      //
+      // Defensive shape check on the wire format. normalizeRecipe sanitises and
+      // defaults every field, so this should never fail; if it does, the recipe is
+      // rejected rather than cached and served as-is.
+      const validated = validateExtractedRecipe(recipe);
+      if (!validated.success) {
+        request.log.error(
+          { url, errors: validated.errors },
+          'normalization produced an invalid ExtractedRecipe',
+        );
+        throw new HttpError(500, 'internal_error', 'Something went wrong.');
+      }
+
+      await store.setJson(cacheKey(canonical), recipe, cacheTtlSeconds);
+
+      // A short link (vm.tiktok.com/…) can't be canonicalised before scraping,
+      // but the scraper hands back the platform's own id. Writing an alias under
+      // that id means the next person who pastes the full URL gets a free hit.
+      const alias = cacheKeyFromShortcode(platform, scraped.shortcode);
+      if (alias && alias !== canonical) {
+        await store.setJson(cacheKey(alias), recipe, cacheTtlSeconds);
+      }
+
+      // Discover: make this extraction searchable for everyone. Fire-and-forget -
+      // indexing must never slow down or fail the response. The platform id
+      // beats a short link's path as the identity.
+      //
+      // The parse call returned the search tags in the same request (a JSON-LD
+      // blog has none, and the indexer's rules tag it); a stated JSON-LD time
+      // beats the estimate.
+      void deps.indexer?.index(
+        alias ?? canonical,
+        recipe,
+        scraped.ownerUsername,
+        request.log,
+        facetsFromParsed(finalParsed),
+        scraped.totalMinutes,
       );
-      throw new HttpError(500, 'internal_error', 'Something went wrong.');
+      // Charged only on success, so a failed extraction never burns an allowance.
+      // The global counter above is incremented up front instead, because a failed
+      // attempt still costs us money upstream.
+      if (metered) {
+        await store.incrWithTtl(`q:dev:${deviceId}:${monthKey(now)}`, MONTH_TTL_SECONDS);
+      }
+
+      return recipe;
+    } catch (error) {
+      if (error instanceof HttpError && error.code === 'not_a_recipe') {
+        await store.setJson(negativeExtractKey(canonical), { message: error.message }, NEGATIVE_TTL_SECONDS);
+      }
+      throw error;
     }
-
-    await store.setJson(cacheKey(canonical), recipe, cacheTtlSeconds);
-
-    // A short link (vm.tiktok.com/…) can't be canonicalised before scraping,
-    // but the scraper hands back the platform's own id. Writing an alias under
-    // that id means the next person who pastes the full URL gets a free hit.
-    const alias = cacheKeyFromShortcode(platform, scraped.shortcode);
-    if (alias && alias !== canonical) {
-      await store.setJson(cacheKey(alias), recipe, cacheTtlSeconds);
-    }
-
-    // Discover: make this extraction searchable for everyone. Fire-and-forget -
-    // indexing (and its classify call) must never slow down or fail the
-    // response. The platform id beats a short link's path as the identity.
-    void deps.indexer?.index(alias ?? canonical, recipe, scraped.ownerUsername, request.log);
-    // Charged only on success, so a failed extraction never burns an allowance.
-    // The global counter above is incremented up front instead, because a failed
-    // attempt still costs us money upstream.
-    if (metered) {
-      await store.incrWithTtl(`q:dev:${deviceId}:${monthKey(now)}`, MONTH_TTL_SECONDS);
-    }
-
-    return recipe;
   });
 }

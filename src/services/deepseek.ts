@@ -13,6 +13,7 @@
 
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
+import { FACET_GUIDE, FACET_SCHEMA_PROPERTIES } from '../lib/facet-rules.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
 import { validateParsedRecipe } from '../lib/validate.js';
 
@@ -77,7 +78,10 @@ RULES:
 
 8. suggestedCategory: Choose from meals, drinks, snacks, desserts.
 
-9. Macros: Only include if explicitly stated in the text. Otherwise estimate from ingredients. Set macrosStatedInCaption accordingly.`;
+9. Macros: Only include if explicitly stated in the text. Otherwise estimate from ingredients. Set macrosStatedInCaption accordingly.
+
+10. Search tags - also return "dietTags" (array of strings) and "totalMinutes" (integer). These never change the fields above:
+${FACET_GUIDE}`;
 
 const RESPONSE_SCHEMA = {
   type: 'object',
@@ -99,6 +103,7 @@ const RESPONSE_SCHEMA = {
     },
     macrosStatedInCaption: { type: 'boolean' },
     suggestedCategory: { type: 'string', enum: [...CATEGORIES] },
+    ...FACET_SCHEMA_PROPERTIES,
     sufficient: { type: 'boolean' },
     confidence: { type: 'number' },
     missing: { type: 'array', items: { type: 'string' } },

@@ -11,9 +11,13 @@ import {
   REPORT_REASONS,
   requireUuid,
 } from '../lib/community-kit.js';
-import { classifyWithinBudget, type ClassifyBudget } from '../lib/discover-indexer.js';
+import { ingredientsHash, recipeBodyHash } from '../lib/ai-cache.js';
+import { countAi } from '../lib/ai-stats.js';
+import type { DiscoverDb } from '../lib/discover-db.js';
+import { knownFacets, rememberFacets } from '../lib/discover-indexer.js';
+import { deriveFacets } from '../lib/facet-rules.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
-import { facetColumns, facetDto, parseFilters } from '../lib/recipe-facets.js';
+import { facetColumns, facetDto, parseFilters, storedFacets, type RecipeFacets } from '../lib/recipe-facets.js';
 import type {
   FeedCommentRow,
   FeedPlatform,
@@ -24,7 +28,7 @@ import type {
 } from '../lib/recipe-feed-db.js';
 import type { Store } from '../lib/store.js';
 import { CATEGORIES, type Category } from '../lib/types.js';
-import { publicShareUrl } from '../lib/url.js';
+import { canonicalCacheKey, publicShareUrl } from '../lib/url.js';
 import {
   localCheck,
   recipeBodyCheck,
@@ -62,8 +66,11 @@ import { MAX_IMAGE_BYTES, sniffImageType, type ImageRehoster, type UploadedImage
 /** Largest request body for share / re-share: a base64 photo plus the recipe. */
 export const FEED_BODY_LIMIT = 8 * 1024 * 1024;
 
-export interface RecipeFeedOptions extends ClassifyBudget {
+export interface RecipeFeedOptions {
   db: RecipeFeedDb;
+  store: Store;
+  /** Discover's index: a share of a recipe we extracted reuses its checks and tags. */
+  discoverDb?: DiscoverDb;
   /** Bans and blocks (shared tables). */
   communityDb: CommunityDb;
   moderator?: ContentModerator;
@@ -289,37 +296,70 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
   /**
    * Local checks, then the AI moderator. `typed` is what the person wrote
    * themselves (full `localCheck`); `body` is recipe content (relaxed check).
-   * Returns whether the item must be flagged for review.
+   *
+   * `bodyKnown`: this exact body is already public (our own extraction in
+   * Discover, or a visible post it was copied from), so the model only sees
+   * what is new - the typed text and the photo. `wantFacets`: the model also
+   * tags the body in the same request (better than the word lists alone).
    */
   async function screen(
     typed: string,
     body: string,
     kind: Extract<ModerationKind, 'recipe' | 'suggestion'>,
     request: FastifyRequest,
-    image?: ModerationImage,
-  ): Promise<boolean> {
+    options: { image?: ModerationImage; bodyKnown?: boolean; wantFacets?: boolean } = {},
+  ): Promise<{ needsReview: boolean; facets: RecipeFacets | null }> {
     for (const verdict of [localCheck(typed), recipeBodyCheck(body)]) {
       if (!verdict.allowed) {
         request.log.info({ category: verdict.category, kind }, 'feed: rejected by local check');
         throw rejected();
       }
     }
-    if (!moderator) return false;
+    if (!moderator) return { needsReview: false, facets: null };
+    const judgeBody = Boolean(body) && !options.bodyKnown;
+    if (body && options.bodyKnown) await countAi(store, 'moderateBodySkipped');
     try {
-      const verdict = await moderator.review(body ? `${typed}\n\n${body}` : typed, kind, image);
+      const verdict = await moderator.review(judgeBody ? `${typed}\n\n${body}` : typed, kind, options.image, {
+        facets: judgeBody && options.wantFacets,
+      });
       if (!verdict.allowed) {
         request.log.info({ category: verdict.category, kind }, 'feed: rejected by moderator');
         throw rejected();
       }
-      return false;
+      return { needsReview: false, facets: verdict.facets ?? null };
     } catch (error) {
       if (error instanceof HttpError && error.code === 'content_rejected') throw error;
       request.log.warn({ err: error, kind }, 'feed: moderation unavailable');
       if (kind === 'recipe') {
         throw new HttpError(503, 'moderation_unavailable', "We couldn't check your recipe right now. Please try again shortly.");
       }
-      return true;
+      return { needsReview: true, facets: null };
     }
+  }
+
+  /**
+   * Public copies of a shared recipe that the server already trusts: its
+   * Discover row (when it came from a link we extracted), the post it remixes,
+   * and the post being re-shared. Hidden, removed or under-review copies don't
+   * count - their content is exactly what can't be vouched for.
+   */
+  async function knownCopies(
+    recipe: SharedRecipe,
+    related: (FeedPostRow | null)[],
+  ): Promise<{ recipe: { ingredients: string[]; steps: string[] }; facets: RecipeFacets | null }[]> {
+    const copies: { recipe: { ingredients: string[]; steps: string[] }; facets: RecipeFacets | null }[] = [];
+    for (const post of related) {
+      if (post && !post.hidden && !post.removed && !post.needs_review) copies.push({ recipe: post.recipe, facets: storedFacets(post) });
+    }
+    if (deps.discoverDb?.configured && recipe.sourceUrl && recipe.sourcePlatform !== 'manual') {
+      try {
+        const row = await deps.discoverDb.getByKey(canonicalCacheKey(recipe.sourceUrl, recipe.sourcePlatform));
+        if (row && !row.hidden) copies.push({ recipe: row.recipe, facets: storedFacets(row) });
+      } catch (error) {
+        void error; // a lookup miss only means the full check runs
+      }
+    }
+    return copies;
   }
 
   async function visiblePost(id: string, me: string | null): Promise<FeedPostRow> {
@@ -343,26 +383,43 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
   async function enrich(
     request: FastifyRequest,
     input: Awaited<ReturnType<typeof prepare>>,
+    related: (FeedPostRow | null)[] = [],
   ) {
     const { recipe, imageUrl, upload, note, authorName } = input;
     const typed = [authorName ? `Display name: ${authorName}` : '', `Title: ${recipe.title}`, note ? `Note: ${note}` : '']
       .filter(Boolean)
       .join('\n');
     const content = [...recipe.ingredients, ...recipe.steps].join('\n');
-    const needsReview = await screen(
-      typed,
-      content,
-      'recipe',
-      request,
-      upload ? { mimeType: upload.mimeType, data: upload.bytes.toString('base64') } : undefined,
-    );
+
+    // Reuse what is already known about this body: an identical public copy
+    // vouches for the body and carries its tags; a remix with the same
+    // ingredients keeps the original's tags; failing those, the shared tag
+    // cache, and failing that the moderation call tags it on the side.
+    const copies = await knownCopies(recipe, related);
+    const bodyHash = recipeBodyHash(recipe);
+    const sameBody = copies.filter((copy) => recipeBodyHash(copy.recipe) === bodyHash);
+    let facets =
+      sameBody.find((copy) => copy.facets)?.facets ??
+      copies.find((copy) => copy.facets && ingredientsHash(copy.recipe) === ingredientsHash(recipe))?.facets ??
+      (await knownFacets(store, recipe));
+    if (facets) await countAi(store, 'facetsReused');
+
+    const verdict = await screen(typed, content, 'recipe', request, {
+      image: upload ? { mimeType: upload.mimeType, data: upload.bytes.toString('base64') } : undefined,
+      bodyKnown: sameBody.length > 0,
+      wantFacets: !facets,
+    });
+    if (!facets && verdict.facets) {
+      facets = verdict.facets;
+      await rememberFacets(store, recipe, verdict.facets);
+    }
+    // Still no model answer (moderation unavailable, or a vouched-for body
+    // with no stored tags): the word lists decide on their own.
+    if (!facets) await countAi(store, 'facetsFromRules');
 
     // Their own (moderated) photo first, else a copied Instagram/TikTok
     // thumbnail, else none - the app draws a placeholder.
-    const [facets, image] = await Promise.all([
-      classifyWithinBudget(deps, recipe, request.log),
-      upload ? deps.rehoster.storeUpload(upload) : deps.rehoster.rehost(imageUrl),
-    ]);
+    const image = upload ? await deps.rehoster.storeUpload(upload) : await deps.rehoster.rehost(imageUrl);
 
     return {
       author_name: authorName,
@@ -372,8 +429,8 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
       source_platform: recipe.sourcePlatform,
       servings: recipe.servings ?? null,
       recipe,
-      needs_review: needsReview,
-      ...facetColumns(recipe, facets),
+      needs_review: verdict.needsReview,
+      ...facetColumns(recipe, deriveFacets(recipe, facets)),
     };
   }
 
@@ -434,9 +491,9 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const input = await prepare(request);
     const remixOf = input.body.remixOf == null ? null : requireUuid(input.body.remixOf, 'original recipe');
     const me = await writer(request, 'post');
-    if (remixOf) await visiblePost(remixOf, me);
+    const parent = remixOf ? await visiblePost(remixOf, me) : null;
 
-    const columns = await enrich(request, input);
+    const columns = await enrich(request, input, [parent]);
     const row = await db.insert({ ...columns, author_hash: me, remix_of: remixOf });
     request.log.info({ postId: row.id, remixOf }, 'feed: recipe shared');
     return reply.status(201).send({ post: toPostDto(row, me) });
@@ -450,7 +507,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     // Same answer for "not yours" and "doesn't exist": no ownership oracle.
     if (!post || post.author_hash !== me || post.removed) throw notFound();
 
-    const columns = await enrich(request, input);
+    const columns = await enrich(request, input, [post]);
     // A re-share without a new photo keeps the one already published.
     const row = await db.update(id, { ...columns, image_url: columns.image_url ?? post.image_url });
     if (!row) throw notFound();
@@ -500,7 +557,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const me = await writer(request, 'comment');
     const post = await visiblePost(id, me);
     const typed = authorName ? `Display name: ${authorName}\n${text}` : text;
-    const needsReview = await screen(typed, '', 'suggestion', request);
+    const { needsReview } = await screen(typed, '', 'suggestion', request);
     const row = await db.insertComment({
       post_id: id,
       author_hash: me,

@@ -15,12 +15,13 @@ import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from '.
 import { createStore, type Store } from './lib/store.js';
 import { createUnconfiguredCommunityDb, type CommunityDb } from './lib/community-db.js';
 import { createUnconfiguredDiscoverDb, type DiscoverDb } from './lib/discover-db.js';
-import { createDiscoverIndexer, sweepUntaggedPosts } from './lib/discover-indexer.js';
+import { createDiscoverIndexer } from './lib/discover-indexer.js';
 import { createUnconfiguredRecipeFeedDb, type RecipeFeedDb } from './lib/recipe-feed-db.js';
-import type { RecipeClassifier } from './services/classify.js';
 import { createPassthroughRehoster, type ImageRehoster } from './services/rehost.js';
 import { createSupabase, type Supabase } from './lib/supabase.js';
 import { registerAccountRoute } from './routes/account.js';
+import { readAiStats } from './lib/ai-stats.js';
+import { withModerationCache } from './services/moderation.js';
 import { registerCommunityRoutes } from './routes/community.js';
 import { registerDiscoverRoutes } from './routes/discover.js';
 import { registerRecipeFeedRoutes } from './routes/recipe-feed.js';
@@ -41,9 +42,6 @@ const DEFAULT_LIMITS: ExtractLimits = {
 
 /** Same, for the `/improve` daily ceiling. See `config.ts` for the sizing. */
 const DEFAULT_GLOBAL_DAILY_IMPROVE_LIMIT = 150;
-
-/** Same, for the Discover / recipe-feed classify ceiling. See `config.ts`. */
-const DEFAULT_GLOBAL_DAILY_CLASSIFY_LIMIT = 300;
 
 /** No codes issued by default, so tests can't accidentally redeem one. */
 const DEFAULT_REDEEM: RedeemOptions = { plusRedeemCodes: [], plusGrantDays: 0 };
@@ -79,6 +77,8 @@ export interface AppDeps {
    * budgets are not pooled.
    */
   globalDailyImproveLimit?: number;
+  /** Per-install AI improvements per day (`/improve`). */
+  deviceDailyImproveLimit?: number;
   /** Issued Plus codes + grant lifetime. Omitted = redemption disabled. */
   redeem?: RedeemOptions;
   rateLimit?: RateLimitOptions;
@@ -105,13 +105,9 @@ export interface AppDeps {
   discoverDb?: DiscoverDb;
   /** Community recipe feed storage. Omitted = unconfigured (503). */
   recipeFeedDb?: RecipeFeedDb;
-  /** Diet/time/difficulty tagging. Omitted = recipes stay untagged. */
-  classifier?: RecipeClassifier;
   /** Copies expiring CDN photos to our bucket. Omitted = URLs kept as-is. */
   rehoster?: ImageRehoster;
-  /** Service-wide classify calls per day. */
-  globalDailyClassifyLimit?: number;
-  /** How often to retry classifying untagged Discover rows. Omitted = never. */
+  /** How often to tag Discover rows written before rule tagging. Omitted = never. */
   discoverSweepMs?: number;
 }
 
@@ -184,6 +180,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
         misses: miss,
         hitRate: total === 0 ? null : Math.round((hit / total) * 100) / 100,
       },
+      // Every model request this month, and every one a cache or rule saved.
+      ai: await readAiStats(store, now),
       deepseek: {
         enabled: Boolean(deps.deepseekParser),
         triggered: deepseekTriggered,
@@ -203,21 +201,17 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   const discoverDb = deps.discoverDb ?? createUnconfiguredDiscoverDb();
+  // Allowed verdicts are remembered, so the same text is never judged twice.
+  const moderator = deps.moderator ? withModerationCache(deps.moderator, store) : undefined;
   const communityDb = deps.communityDb ?? createUnconfiguredCommunityDb();
   const rehoster = deps.rehoster ?? createPassthroughRehoster();
-  const classifyBudget = {
-    store,
-    classifier: deps.classifier,
-    dailyClassifyLimit: deps.globalDailyClassifyLimit ?? DEFAULT_GLOBAL_DAILY_CLASSIFY_LIMIT,
-  };
-  const indexer = createDiscoverIndexer({ ...classifyBudget, db: discoverDb, rehoster });
+  const indexer = createDiscoverIndexer({ store, db: discoverDb, rehoster });
   const recipeFeedDb = deps.recipeFeedDb ?? createUnconfiguredRecipeFeedDb();
-  // Retry classification for rows that missed it (over budget, Gemini blip,
-  // backfilled). Production only - tests never pass an interval.
+  // Tags rows indexed before tagging moved to rules (or backfilled). Rules
+  // only, no model calls. Production only - tests never pass an interval.
   if (deps.discoverSweepMs) {
     const timer = setInterval(async () => {
-      await indexer.sweep(20, app.log);
-      await sweepUntaggedPosts(recipeFeedDb, classifyBudget, 10, app.log);
+      await indexer.sweep(100, app.log);
     }, deps.discoverSweepMs);
     // Don't hold the process open for it (Node's Timeout; typed loosely so
     // the app's DOM-typed tsc pass over this file agrees).
@@ -238,7 +232,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerCommunityRoutes(app, {
     db: communityDb,
     store,
-    moderator: deps.moderator,
+    moderator,
     hashPepper: deps.communityHashPepper ?? '',
   });
   registerDiscoverRoutes(app, {
@@ -248,10 +242,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     hashPepper: deps.communityHashPepper ?? '',
   });
   registerRecipeFeedRoutes(app, {
-    ...classifyBudget,
+    store,
     db: recipeFeedDb,
     communityDb,
-    moderator: deps.moderator,
+    discoverDb,
+    moderator,
     rehoster,
     hashPepper: deps.communityHashPepper ?? '',
   });

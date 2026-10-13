@@ -5,9 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildApp, type AppDeps } from '../app.js';
 import { createMemoryCommunityDb } from '../lib/community-db.js';
 import { upstreamError } from '../lib/errors.js';
-import { sweepUntaggedPosts } from '../lib/discover-indexer.js';
+import { createMemoryDiscoverDb, type DiscoverDb } from '../lib/discover-db.js';
+import { facetColumns } from '../lib/recipe-facets.js';
 import { createMemoryRecipeFeedDb } from '../lib/recipe-feed-db.js';
-import { createStore } from '../lib/store.js';
 import type { ContentModerator } from '../services/moderation.js';
 import type { ImageRehoster } from '../services/rehost.js';
 
@@ -44,7 +44,7 @@ const shared = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function setup(options: { moderator?: ContentModerator; configured?: boolean } = {}) {
+function setup(options: { moderator?: ContentModerator; configured?: boolean; discoverDb?: DiscoverDb } = {}) {
   const db = createMemoryRecipeFeedDb();
   const rehoster = fakeRehoster();
   const communityDb = createMemoryCommunityDb();
@@ -60,6 +60,7 @@ function setup(options: { moderator?: ContentModerator; configured?: boolean } =
     communityDb,
     recipeFeedDb: options.configured === false ? undefined : db,
     moderator: options.moderator,
+    discoverDb: options.discoverDb,
     communityHashPepper: PEPPER,
     rehoster,
     rateLimit: { max: 1000, windowMs: 60_000 },
@@ -142,7 +143,7 @@ describe('community recipe feed', () => {
       author_hash: hashOf('alice'), author_name: null, remix_of: null, note: '', image_url: null, source_url: null,
       source_platform: 'manual', servings: null, recipe: shared() as never, needs_review: false, title: 'Dal',
       category: 'meals', calories: 0, protein: 0, carbs: 0, fat: 0, diet_tags: [], total_minutes: null,
-      difficulty: null, search_text: 'dal',
+      search_text: 'dal',
     });
     const res = await as('bob').post(`/community/recipes/${row.id}/comments`, { body: 'Add lemon at the end.' });
     expect(res.statusCode).toBe(201);
@@ -263,7 +264,12 @@ describe('community recipe feed', () => {
       const post = await share('alice', { image: { mimeType: 'image/png', data: JPEG_B64 } });
       // The bytes decide the type, not the claimed mimeType.
       expect(post.imageUrl).toBe('https://bucket.test/jpeg-8');
-      expect(review).toHaveBeenCalledWith(expect.any(String), 'recipe', { mimeType: 'image/jpeg', data: JPEG_B64 });
+      expect(review).toHaveBeenCalledWith(
+        expect.any(String),
+        'recipe',
+        { mimeType: 'image/jpeg', data: JPEG_B64 },
+        { facets: true },
+      );
     });
 
     it('refuses an upload that is not an image', async () => {
@@ -283,13 +289,86 @@ describe('community recipe feed', () => {
     });
   });
 
-  it('tags a post later when classification failed at share time', async () => {
-    const { db, share } = setup();
+  it('tags a post by rules when no model answer comes with it', async () => {
+    const { share } = setup();
     const post = await share('alice');
-    expect(db.admin.posts()[0].difficulty).toBeNull();
-    const classifier = { classify: vi.fn(async () => ({ dietTags: ['vegan' as const], totalMinutes: 30, difficulty: 'easy' as const })) };
-    const store = createStore({ upstashUrl: '', upstashToken: '' });
-    expect(await sweepUntaggedPosts(db, { store, classifier, dailyClassifyLimit: 10 }, 10)).toBe(1);
-    expect(db.admin.posts().find((p) => p.id === post.id)).toMatchObject({ difficulty: 'easy', diet_tags: ['vegan'] });
+    // Lentils, onion, cumin: nothing animal in the list.
+    expect(post).toMatchObject({ dietTags: ['vegetarian', 'vegan'], totalMinutes: null });
+  });
+
+  describe('AI cost', () => {
+    const allowWithTags = () =>
+      vi.fn(async (..._args: Parameters<ContentModerator['review']>) => ({
+        allowed: true as const,
+        facets: { dietTags: ['vegan' as const], totalMinutes: 35 },
+      }));
+
+    it('judges an identical recipe once, and tags it in the same call', async () => {
+      const review = allowWithTags();
+      const { share } = setup({ moderator: { review } });
+      const first = await share('alice');
+      await share('bob');
+      expect(review).toHaveBeenCalledTimes(1);
+      expect(review.mock.calls[0][3]).toEqual({ facets: true });
+      expect(first).toMatchObject({ totalMinutes: 35, dietTags: ['vegetarian', 'vegan'] });
+    });
+
+    it('never caches a rejection', async () => {
+      const review = vi
+        .fn()
+        .mockResolvedValueOnce({ allowed: false, category: 'spam' })
+        .mockResolvedValue({ allowed: true });
+      const { as } = setup({ moderator: { review } });
+      expect((await as('alice').post('/community/recipes', { recipe: shared() })).statusCode).not.toBe(201);
+      expect((await as('alice').post('/community/recipes', { recipe: shared() })).statusCode).toBe(201);
+      expect(review).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips judging and tagging a body Discover already publishes', async () => {
+      const discoverDb = createMemoryDiscoverDb();
+      const recipe = { ...shared(), sourceUrl: 'https://www.instagram.com/p/DAL1/' } as never as Parameters<typeof facetColumns>[0] & {
+        ingredients: string[];
+        steps: string[];
+      };
+      await discoverDb.upsert({
+        canonical_key: 'ig:DAL1',
+        source_url: 'https://www.instagram.com/p/DAL1/',
+        source_platform: 'instagram',
+        creator: null,
+        image_url: null,
+        servings: 4,
+        ingredients: recipe.ingredients,
+        recipe: recipe as never,
+        ...facetColumns(recipe, null),
+      });
+      await discoverDb.setFacets('ig:DAL1', { dietTags: ['vegetarian'], totalMinutes: 50 });
+
+      const review = allowWithTags();
+      const { share } = setup({ moderator: { review }, discoverDb });
+      // Re-typed with different whitespace/case: still the same body.
+      const post = await share('alice', { recipe: shared({ ingredients: ['200 G red lentils', '1 onion ', '2 tsp cumin'] }) });
+
+      expect(review).toHaveBeenCalledTimes(1);
+      const [text, , , options] = review.mock.calls[0];
+      expect(text).not.toContain('red lentils');
+      expect(text).toContain('Weeknight dal');
+      expect(options).toEqual({ facets: false });
+      expect(post).toMatchObject({ totalMinutes: 50, dietTags: ['vegetarian'] });
+    });
+
+    it("gives a remix with the same ingredients the original's tags", async () => {
+      const review = allowWithTags();
+      const { share } = setup({ moderator: { review } });
+      const original = await share('alice');
+      const remix = await share('bob', {
+        recipe: shared({ steps: ['Rinse the lentils.', 'Simmer 25 minutes with more cumin.'] }),
+        remixOf: original.id,
+      });
+      expect(review).toHaveBeenCalledTimes(2);
+      // The changed steps are still judged, but no tags are asked for.
+      expect(review.mock.calls[1][0]).toContain('25 minutes');
+      expect(review.mock.calls[1][3]).toEqual({ facets: false });
+      expect(remix).toMatchObject({ totalMinutes: 35, dietTags: ['vegetarian', 'vegan'] });
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { unprocessable, upstreamError } from '../lib/errors.js';
-import type { ScrapedPost } from '../lib/types.js';
+import { parseIsoDuration } from '../lib/facet-rules.js';
+import type { Category, ParsedRecipe, ScrapedPost } from '../lib/types.js';
 
 export interface WebScraper {
   scrape(url: string): Promise<ScrapedPost>;
@@ -140,6 +141,101 @@ function recipeNodeToText(recipe: Record<string, unknown>): string {
   return lines.join('\n');
 }
 
+const ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+
+/** JSON-LD strings often carry HTML entities and stray tags; the LLM used to clean those. */
+function cleanJsonLdText(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, code: string) => {
+      if (code[0] === '#') {
+        const n = code[1] === 'x' || code[1] === 'X' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+        return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : whole;
+      }
+      return ENTITIES[code.toLowerCase()] ?? whole;
+    })
+    .replace(/\s+/g, ' ')
+    .replace(/ ([.,;:!?])/g, '$1')
+    .trim();
+}
+
+/** "350 calories", "12.5 g", "12g", 12 -> 350, 12.5, 12. Null when absent or unreadable. */
+function nutritionNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
+  if (typeof value !== 'string') return null;
+  const match = /\d+(?:[.,]\d+)?/.exec(value);
+  return match ? Number(match[0].replace(',', '.')) : null;
+}
+
+const CATEGORY_KEYWORDS: [Category, RegExp][] = [
+  ['desserts', /\b(dessert|cake|cookie|brownie|pudding|ice cream|cupcake|muffin|fudge|cheesecake|baking)s?\b/i],
+  ['drinks', /\b(drink|beverage|cocktail|mocktail|smoothie|juice|shake|lemonade|latte|tea|coffee)s?\b/i],
+  ['snacks', /\b(snack|appetizer|appetiser|starter|finger food|dip)s?\b/i],
+];
+
+/**
+ * From the site's own `recipeCategory` only - a title like "crab cakes" or
+ * "masala chai rice" is too easy to misread with keywords.
+ */
+function categoryOf(recipe: Record<string, unknown>): Category {
+  const declared = asString(recipe.recipeCategory) ?? '';
+  for (const [category, pattern] of CATEGORY_KEYWORDS) if (pattern.test(declared)) return category;
+  return 'meals';
+}
+
+/**
+ * A JSON-LD recipe that is complete enough to use as-is, with no AI call:
+ * a title, at least two ingredients, step-by-step instructions, and all four
+ * macros stated by the site. Anything less returns null and the page goes
+ * through the LLM parser as before. Blog links are unmetered, so every page
+ * answered here is a model request nobody pays for.
+ */
+export function structuredRecipe(recipe: Record<string, unknown>): ParsedRecipe | null {
+  // "Paneer Butter Masala Recipe" -> "Paneer Butter Masala", as the parser would.
+  const title = cleanJsonLdText(asString(recipe.name) ?? '').replace(/\s+recipe$/i, '');
+  const rawIngredients = recipe.recipeIngredient ?? recipe.ingredients;
+  const ingredients = (Array.isArray(rawIngredients) ? rawIngredients : [])
+    .map((item) => cleanJsonLdText(asString(item) ?? ''))
+    .filter(Boolean);
+  // A single string is usually one paragraph of instructions; only real
+  // step lists are trusted without the parser splitting them.
+  const steps = Array.isArray(recipe.recipeInstructions)
+    ? flattenInstructions(recipe.recipeInstructions).map(cleanJsonLdText).filter(Boolean)
+    : [];
+  const nutrition = (recipe.nutrition && typeof recipe.nutrition === 'object' ? recipe.nutrition : {}) as Record<
+    string,
+    unknown
+  >;
+  const calories = nutritionNumber(nutrition.calories);
+  const protein = nutritionNumber(nutrition.proteinContent);
+  const carbs = nutritionNumber(nutrition.carbohydrateContent);
+  const fat = nutritionNumber(nutrition.fatContent);
+  if (!title || ingredients.length < 2 || steps.length < 1) return null;
+  if (calories === null || !(calories > 0) || protein === null || carbs === null || fat === null) return null;
+
+  const yieldText = asString(recipe.recipeYield) ?? '';
+  const servings = Number.parseInt(/\d+/.exec(yieldText)?.[0] ?? '', 10);
+  return {
+    isRecipe: true,
+    title: title.slice(0, 200),
+    servings: Number.isInteger(servings) && servings >= 1 && servings <= 100 ? servings : undefined,
+    ingredients,
+    steps,
+    macros: { calories, protein, carbs, fat },
+    macrosStatedInCaption: true,
+    suggestedCategory: categoryOf(recipe),
+  };
+}
+
+/** The author's stated total time, else prep + cook. */
+function statedMinutes(recipe: Record<string, unknown>): number | undefined {
+  const total = parseIsoDuration(recipe.totalTime);
+  if (total) return total;
+  const prep = parseIsoDuration(recipe.prepTime) ?? 0;
+  const cook = parseIsoDuration(recipe.cookTime) ?? 0;
+  return prep + cook > 0 ? prep + cook : undefined;
+}
+
 function extractMeta(html: string, property: string): string | undefined {
   // Match the whole <meta> tag first, then pull content out separately, so
   // this works regardless of whether `property`/`name` comes before or after
@@ -191,6 +287,8 @@ export function createWebScraper(fetchImpl: typeof fetch = fetch): WebScraper {
         return {
           caption: recipeNodeToText(recipe),
           imageUrl: resolveImageUrl(rawImage, url),
+          structured: structuredRecipe(recipe) ?? undefined,
+          totalMinutes: statedMinutes(recipe),
         };
       }
 

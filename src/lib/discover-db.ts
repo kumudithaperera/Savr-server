@@ -45,7 +45,7 @@ export type IndexUpsert = Omit<
 /** Columns a list needs - never the full recipe, so steps can't leak via search. */
 const LIST_COLUMNS =
   'id,canonical_key,source_url,source_platform,creator,title,image_url,category,servings,' +
-  'calories,protein,carbs,fat,diet_tags,total_minutes,difficulty,save_count,created_at';
+  'calories,protein,carbs,fat,diet_tags,total_minutes,save_count,created_at';
 
 export type DiscoverSort = 'popular' | 'new';
 
@@ -75,7 +75,7 @@ export interface DiscoverDb {
   getByKey(canonicalKey: string): Promise<IndexRow | null>;
   setFacets(canonicalKey: string, facets: RecipeFacets): Promise<void>;
   setImage(canonicalKey: string, imageUrl: string | null): Promise<void>;
-  /** Oldest unclassified rows first, for the classify sweep. */
+  /** Oldest untagged rows first, for the tag sweep. */
   unclassified(limit: number): Promise<IndexRow[]>;
   /** Idempotent per device. */
   recordSave(id: string, saverHash: string): Promise<void>;
@@ -115,11 +115,10 @@ export function createSupabaseDiscoverDb(config: PostgrestConfig, deps: { fetch?
         headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify({
           ...row,
-          // Facets are owned by the classify pass. Leaving them out of the
+          // Facets are written by `setFacets`. Leaving them out of the
           // payload is what keeps an upsert from wiping them.
           diet_tags: undefined,
           total_minutes: undefined,
-          difficulty: undefined,
           updated_at: new Date().toISOString(),
         }),
       });
@@ -141,7 +140,6 @@ export function createSupabaseDiscoverDb(config: PostgrestConfig, deps: { fetch?
       await patch(canonicalKey, {
         diet_tags: facets.dietTags,
         total_minutes: facets.totalMinutes,
-        difficulty: facets.difficulty,
         classified_at: new Date().toISOString(),
       });
     },
@@ -195,7 +193,6 @@ export function createMemoryDiscoverDb(): DiscoverDb & {
         id: existing?.id ?? randomUUID(),
         diet_tags: existing?.diet_tags ?? [],
         total_minutes: existing?.total_minutes ?? null,
-        difficulty: existing?.difficulty ?? null,
         classified_at: existing?.classified_at ?? null,
         save_count: existing?.save_count ?? 0,
         report_count: existing?.report_count ?? 0,
@@ -233,7 +230,6 @@ export function createMemoryDiscoverDb(): DiscoverDb & {
       if (!row) return;
       row.diet_tags = facets.dietTags;
       row.total_minutes = facets.totalMinutes;
-      row.difficulty = facets.difficulty;
       row.classified_at = now();
     },
 

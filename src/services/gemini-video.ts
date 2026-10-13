@@ -12,6 +12,7 @@
 import type { Config } from '../config.js';
 import { upstreamError, unprocessable } from '../lib/errors.js';
 import { generateContentWithRetry } from '../lib/geminiFetch.js';
+import { FACET_GUIDE, FACET_SCHEMA_PROPERTIES } from '../lib/facet-rules.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
 import { validateParsedRecipe } from '../lib/validate.js';
 
@@ -50,6 +51,7 @@ const RESPONSE_SCHEMA = {
     },
     macrosStatedInCaption: { type: 'boolean' },
     suggestedCategory: { type: 'string', enum: [...CATEGORIES] },
+    ...FACET_SCHEMA_PROPERTIES,
   },
   required: [
     'isRecipe',
@@ -59,6 +61,8 @@ const RESPONSE_SCHEMA = {
     'macros',
     'macrosStatedInCaption',
     'suggestedCategory',
+    'dietTags',
+    'totalMinutes',
   ],
 } as const;
 
@@ -99,7 +103,10 @@ Uncertainty handling:
 - If audio is unclear, use visual context to verify
 - If conflicting information exists, prefer what is clearly shown/written
 - Mark quantities as "approximately" when not precisely stated
-- Do not fabricate information not present in the video`;
+- Do not fabricate information not present in the video
+
+Search tags (judge the recipe as written; these never change the fields above):
+${FACET_GUIDE}`;
 
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];

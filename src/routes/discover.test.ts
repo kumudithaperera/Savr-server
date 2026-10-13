@@ -7,7 +7,6 @@ import { createDiscoverIndexer } from '../lib/discover-indexer.js';
 import { createStore } from '../lib/store.js';
 import type { ExtractedRecipe } from '../lib/types.js';
 import { publicShareUrl, publicSourceUrl } from '../lib/url.js';
-import type { RecipeClassifier } from '../services/classify.js';
 import { createPassthroughRehoster } from '../services/rehost.js';
 
 /**
@@ -33,7 +32,7 @@ const recipe = (over: Partial<ExtractedRecipe> = {}): ExtractedRecipe => ({
   ...over,
 });
 
-function setup(options: { classifier?: RecipeClassifier; configured?: boolean } = {}) {
+function setup(options: { configured?: boolean } = {}) {
   const db = createMemoryDiscoverDb();
   const communityDb = createMemoryCommunityDb();
   const store = createStore({ upstashUrl: '', upstashToken: '' });
@@ -49,16 +48,13 @@ function setup(options: { classifier?: RecipeClassifier; configured?: boolean } 
     store,
     communityDb,
     discoverDb: options.configured === false ? undefined : db,
-    classifier: options.classifier,
     communityHashPepper: PEPPER,
     rateLimit: { max: 1000, windowMs: 60_000 },
   } as AppDeps);
   const indexer = createDiscoverIndexer({
     db,
     store,
-    classifier: options.classifier,
     rehoster: createPassthroughRehoster(),
-    dailyClassifyLimit: 100,
   });
 
   const as = (deviceId: string | null) => {
@@ -106,9 +102,8 @@ describe('publicSourceUrl', () => {
 });
 
 describe('discover indexer', () => {
-  it('indexes under the public link and tags with the classifier', async () => {
-    const classifier = { classify: vi.fn(async () => ({ dietTags: ['high_protein' as const], totalMinutes: 45, difficulty: 'medium' as const })) };
-    const { db, indexer } = setup({ classifier });
+  it('indexes under the public link and tags it by rules, with no model call', async () => {
+    const { db, indexer } = setup();
     expect(await indexer.index('ig:ABC123', recipe(), 'chef.dan')).toBe(true);
 
     const [row] = db.admin.rows();
@@ -116,32 +111,61 @@ describe('discover indexer', () => {
     expect(row.recipe.sourceUrl).toBe('https://www.instagram.com/p/ABC123/');
     expect(JSON.stringify(row)).not.toContain('sharer-id');
     expect(row.creator).toBe('@chef.dan');
-    expect(row.diet_tags).toEqual(['high_protein']);
-    expect(row.total_minutes).toBe(45);
-    expect(classifier.classify).toHaveBeenCalledTimes(1);
+    // Chicken: not vegetarian. 38 g protein / 12 g carbs: the macro tags.
+    expect(row.diet_tags).toEqual(['high_protein', 'low_carb']);
+    expect(row.classified_at).not.toBeNull();
 
-    // Re-indexing refreshes the recipe but keeps tags and doesn't re-classify.
+    // Re-indexing refreshes the recipe but keeps the tags.
     await indexer.index('ig:ABC123', recipe({ title: 'Better tikka' }));
-    expect(db.admin.rows()[0]).toMatchObject({ title: 'Better tikka', diet_tags: ['high_protein'] });
-    expect(classifier.classify).toHaveBeenCalledTimes(1);
+    expect(db.admin.rows()[0]).toMatchObject({ title: 'Better tikka', diet_tags: ['high_protein', 'low_carb'] });
+  });
+
+  it('uses the tags the extraction returned, and a stated time over its estimate', async () => {
+    const { db, indexer } = setup();
+    const veg = recipe({ ingredients: ['200 g paneer', '1 onion', '2 tomatoes'] });
+    await indexer.index('ig:ABC123', veg, undefined, undefined, { dietTags: ['vegetarian'], totalMinutes: 30 }, 75);
+    expect(db.admin.rows()[0]).toMatchObject({ diet_tags: ['vegetarian', 'high_protein', 'low_carb'], total_minutes: 75 });
+    // The same body indexed under another link reuses the cached answer.
+    await indexer.index('ig:OTHER1', veg);
+    expect(db.admin.rows().find((r) => r.canonical_key === 'ig:OTHER1')?.total_minutes).toBe(30);
+  });
+
+  it('vetoes a model tag the ingredients contradict', async () => {
+    const { db, indexer } = setup();
+    await indexer.index('ig:ABC123', recipe(), undefined, undefined, { dietTags: ['vegan'], totalMinutes: 20 });
+    expect(db.admin.rows()[0].diet_tags).toEqual(['high_protein', 'low_carb']);
+  });
+
+  it('tags rows written before rule tagging in the sweep', async () => {
+    const { db, indexer } = setup();
+    await db.upsert({
+      canonical_key: 'web:example.com/salad',
+      source_url: 'https://example.com/salad',
+      source_platform: 'web',
+      creator: null,
+      image_url: null,
+      servings: 1,
+      ingredients: ['lettuce', 'olive oil', 'lemon'],
+      recipe: recipe({ sourcePlatform: 'web', ingredients: ['lettuce', 'olive oil', 'lemon'] }),
+      title: 'Salad',
+      category: 'meals',
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      diet_tags: [],
+      total_minutes: null,
+      search_text: 'salad',
+    });
+    expect(await indexer.sweep(10)).toBe(1);
+    expect(db.admin.rows()[0].diet_tags).toEqual(['vegetarian', 'vegan', 'high_protein', 'low_carb']);
+    expect(await indexer.sweep(10)).toBe(0);
   });
 
   it('never indexes a web page whose query could be private', async () => {
     const { db, indexer } = setup();
     expect(await indexer.index('web:example.com/recipe?token=abc', recipe({ sourcePlatform: 'web' }))).toBe(false);
     expect(db.admin.rows()).toHaveLength(0);
-  });
-
-  it('survives a classifier failure and lets the sweep retry', async () => {
-    const classify = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('gemini down'))
-      .mockResolvedValue({ dietTags: ['vegan'], totalMinutes: 20, difficulty: 'easy' });
-    const { db, indexer } = setup({ classifier: { classify } });
-    expect(await indexer.index('ig:ABC123', recipe())).toBe(true);
-    expect(db.admin.rows()[0].classified_at).toBeNull();
-    expect(await indexer.sweep(10)).toBe(1);
-    expect(db.admin.rows()[0].diet_tags).toEqual(['vegan']);
   });
 });
 
@@ -155,7 +179,7 @@ describe('discover routes', () => {
     const { db, indexer, as } = setup();
     await indexer.index('ig:ABC123', recipe());
     await indexer.index('web:example.com/salad', recipe({ sourcePlatform: 'web', title: 'Green salad', ingredients: ['lettuce'], macros: { calories: 120, carbs: 8, protein: 3, fat: 9 } }));
-    await db.setFacets('web:example.com/salad', { dietTags: ['vegan'], totalMinutes: 10, difficulty: 'easy' });
+    await db.setFacets('web:example.com/salad', { dietTags: ['vegan'], totalMinutes: 10 });
 
     const all = (await as(null).get('/discover/search')).json();
     expect(all.items).toHaveLength(2);

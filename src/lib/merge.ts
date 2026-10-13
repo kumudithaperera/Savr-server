@@ -287,6 +287,9 @@ export function mergeRecipes(
     macros,
     macrosStatedInCaption: statedInCaption,
     suggestedCategory: category,
+    // Search tags: the video saw the whole recipe, so its tags win.
+    dietTags: video.dietTags ?? primary.dietTags,
+    totalMinutes: video.totalMinutes ?? primary.totalMinutes,
     mergedConfidence,
     videoContributions,
   };

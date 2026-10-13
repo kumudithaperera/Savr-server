@@ -142,6 +142,12 @@ export interface Config {
    * so a full 50-extraction day plus this leaves headroom under that ceiling.
    */
   globalDailyImproveLimit: number;
+  /**
+   * AI improvements per install per day, checked before the global ceiling so
+   * one busy device can't spend it for everyone. Repeats served from the
+   * improve cache don't count.
+   */
+  deviceDailyImproveLimit: number;
   /** Per-IP fixed-window rate limit on the protected routes. */
   ipRateLimitMax: number;
   ipRateLimitWindowMs: number;
@@ -213,16 +219,10 @@ export interface Config {
    */
   communityImageBucket: string;
   /**
-   * Service-wide AI classify calls per day (diet tags / time / difficulty for
-   * Discover and the recipe feed). Its own budget so indexing can never eat
-   * the `/improve` allowance users see.
-   */
-  globalDailyClassifyLimit: number;
-  /**
-   * Gemini model for the small, frequent calls: community moderation and
-   * recipe tagging. Defaults to `geminiModel`. Point it at a lighter model
-   * with its own quota so posting and tagging don't eat the extraction
-   * allowance (on the free tier a model can be capped at ~20 requests/day).
+   * Gemini model for the small, frequent call: community moderation (which
+   * also tags a shared recipe on the side). Defaults to `geminiModel`. Point
+   * it at a lighter model: free-tier quotas are per model, so posting then
+   * never eats the extraction allowance.
    */
   geminiLightModel: string;
 }
@@ -293,6 +293,7 @@ export function loadConfig(): Config {
     plusGrantDays: nonNegativeFromEnv('PLUS_GRANT_DAYS', 0),
     globalDailyExtractionLimit: numberFromEnv('GLOBAL_DAILY_EXTRACTION_LIMIT', 50),
     globalDailyImproveLimit: numberFromEnv('GLOBAL_DAILY_IMPROVE_LIMIT', 150),
+    deviceDailyImproveLimit: numberFromEnv('DEVICE_DAILY_IMPROVE_LIMIT', 40),
     ipRateLimitMax: numberFromEnv('IP_RATE_LIMIT_MAX', 30),
     ipRateLimitWindowMs: numberFromEnv('IP_RATE_LIMIT_WINDOW_MS', 60_000),
     extractCacheTtlDays: numberFromEnv('EXTRACT_CACHE_TTL_DAYS', 365),
@@ -305,7 +306,6 @@ export function loadConfig(): Config {
     communityDb: process.env.COMMUNITY_DB === 'memory' ? 'memory' : 'supabase',
     discoverDb: process.env.DISCOVER_DB === 'memory' ? 'memory' : 'supabase',
     communityImageBucket: process.env.COMMUNITY_IMAGE_BUCKET ?? 'community-images',
-    globalDailyClassifyLimit: numberFromEnv('GLOBAL_DAILY_CLASSIFY_LIMIT', 300),
     geminiLightModel: process.env.GEMINI_LIGHT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
   };
 }

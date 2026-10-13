@@ -67,3 +67,47 @@ describe('createWebScraper image extraction', () => {
     expect(result.imageUrl).toBe('https://cdn.example.com/fallback.jpg');
   });
 });
+
+describe('structured JSON-LD parse (no AI call)', () => {
+  const complete = {
+    name: 'Crispy Chickpea &amp; Spinach Curry',
+    recipeCategory: 'Main Course',
+    recipeYield: ['4', '4 servings'],
+    totalTime: 'PT45M',
+    recipeIngredient: ['1 can chickpeas', '200 g spinach', '1 tbsp curry paste'],
+    recipeInstructions: [
+      { '@type': 'HowToStep', text: 'Fry the <b>paste</b>.' },
+      { '@type': 'HowToSection', itemListElement: [{ '@type': 'HowToStep', text: 'Add the rest &#8211; simmer.' }] },
+    ],
+    nutrition: { calories: '410 kcal', proteinContent: '16 g', carbohydrateContent: '38,5 g', fatContent: '18g' },
+  };
+
+  it('uses a complete recipe as-is, macros stated by the site', async () => {
+    const result = await createWebScraper(htmlFetch(jsonLdPage(complete))).scrape(PAGE_URL);
+    expect(result.structured).toEqual({
+      isRecipe: true,
+      title: 'Crispy Chickpea & Spinach Curry',
+      servings: 4,
+      ingredients: ['1 can chickpeas', '200 g spinach', '1 tbsp curry paste'],
+      steps: ['Fry the paste.', 'Add the rest – simmer.'],
+      macros: { calories: 410, protein: 16, carbs: 38.5, fat: 18 },
+      macrosStatedInCaption: true,
+      suggestedCategory: 'meals',
+    });
+    expect(result.totalMinutes).toBe(45);
+  });
+
+  it('falls back to the LLM when nutrition or real steps are missing', async () => {
+    const noNutrition = { ...complete, nutrition: { calories: '410 kcal' } };
+    expect((await createWebScraper(htmlFetch(jsonLdPage(noNutrition))).scrape(PAGE_URL)).structured).toBeUndefined();
+    const paragraph = { ...complete, recipeInstructions: 'Fry the paste, then add everything and simmer.' };
+    expect((await createWebScraper(htmlFetch(jsonLdPage(paragraph))).scrape(PAGE_URL)).structured).toBeUndefined();
+  });
+
+  it('maps the site category, never the title', async () => {
+    const dessert = { ...complete, name: 'Fish cakes', recipeCategory: 'Dessert' };
+    expect((await createWebScraper(htmlFetch(jsonLdPage(dessert))).scrape(PAGE_URL)).structured?.suggestedCategory).toBe('desserts');
+    const titleOnly = { ...complete, name: 'Chocolate cake', recipeCategory: undefined };
+    expect((await createWebScraper(htmlFetch(jsonLdPage(titleOnly))).scrape(PAGE_URL)).structured?.suggestedCategory).toBe('meals');
+  });
+});

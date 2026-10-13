@@ -33,3 +33,14 @@ export async function generateContentWithRetry(
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   }
 }
+
+/**
+ * `generationConfig` fields that switch off Gemini 2.5 Flash's "thinking".
+ * Thinking is on by default for 2.5 Flash and its tokens are billed as output,
+ * which for a short JSON verdict or a tag list is most of the bill and most of
+ * the latency - and none of the quality. Only the 2.5 Flash family accepts a
+ * zero budget (Pro rejects it), so any other model is left as configured.
+ */
+export function thinkingOff(model: string): { thinkingConfig?: { thinkingBudget: number } } {
+  return /^gemini-2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {};
+}

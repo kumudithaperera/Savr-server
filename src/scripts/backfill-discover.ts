@@ -4,8 +4,8 @@
  * so far rather than only the ones extracted after the feature shipped.
  *
  *   npm run backfill:discover -- --dry-run        # count only, write nothing
- *   npm run backfill:discover                     # index, no AI tagging
- *   npm run backfill:discover -- --classify 500   # then tag up to 500 rows
+ *   npm run backfill:discover                     # index + tag (rules, no AI)
+ *   npm run backfill:discover -- --retag 500      # tag up to 500 older untagged rows
  *   npm run backfill:discover -- --cursor 1234    # resume a SCAN
  *
  * Idempotent: re-running upserts the same rows (tags and counters are kept).
@@ -14,8 +14,8 @@
  * kept only when it hashes back to the key it was read from. That skips
  * orphaned v1 entries and TikTok alias duplicates in one check.
  *
- * Needs: UPSTASH_REDIS_REST_URL/_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
- * and GEMINI_API_KEY for --classify.
+ * Needs: UPSTASH_REDIS_REST_URL/_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+ * Never calls a model: tags come from rules (`lib/facet-rules.ts`).
  */
 import 'dotenv/config';
 
@@ -26,7 +26,6 @@ import type { ExtractedRecipe } from '../lib/types.js';
 import { canonicalCacheKey } from '../lib/url.js';
 import { validateExtractedRecipe } from '../lib/validate.js';
 import { cacheKey } from '../routes/extract.js';
-import { createGeminiClassifier } from '../services/classify.js';
 import { createSupabaseImageRehoster } from '../services/rehost.js';
 
 function arg(name: string): string | undefined {
@@ -43,7 +42,7 @@ function env(name: string): string {
 }
 
 const dryRun = arg('dry-run') !== undefined;
-const classifyLimit = Number(arg('classify') ?? 0) || 0;
+const retagLimit = Number(arg('retag') ?? 0) || 0;
 let cursor = arg('cursor') || '0';
 
 const upstashUrl = env('UPSTASH_REDIS_REST_URL').replace(/\/$/, '');
@@ -65,9 +64,7 @@ const store = createStore({ upstashUrl, upstashToken });
 const indexer = createDiscoverIndexer({
   db,
   store,
-  // No classifier here: tagging is a separate, throttled pass (--classify).
   rehoster: createSupabaseImageRehoster({ ...serviceRole, bucket: process.env.COMMUNITY_IMAGE_BUCKET ?? 'community-images' }),
-  dailyClassifyLimit: 0,
 });
 const log = { info: console.log, warn: console.warn };
 
@@ -110,26 +107,14 @@ do {
   console.log(`cursor ${cursor} -`, JSON.stringify(counts));
 } while (cursor !== '0');
 
-if (classifyLimit > 0 && !dryRun) {
-  // Re-create with a real budget for the tagging pass.
-  const tagger = createDiscoverIndexer({
-    db,
-    store,
-    classifier: createGeminiClassifier({
-      geminiApiKey: env('GEMINI_API_KEY'),
-      geminiModel: process.env.GEMINI_LIGHT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    }),
-    rehoster: createSupabaseImageRehoster({ ...serviceRole, bucket: 'unused' }),
-    dailyClassifyLimit: Number.MAX_SAFE_INTEGER,
-  });
+if (retagLimit > 0 && !dryRun) {
+  // Rows indexed before tagging moved to rules (rules only, so no throttle).
   let tagged = 0;
-  while (tagged < classifyLimit) {
-    const batch = await tagger.sweep(Math.min(20, classifyLimit - tagged), log);
+  while (tagged < retagLimit) {
+    const batch = await indexer.sweep(Math.min(100, retagLimit - tagged), log);
     if (batch === 0) break;
     tagged += batch;
     console.log(`tagged ${tagged}`);
-    // Stay well under Gemini's per-minute limit (see MORSE-78).
-    await new Promise((resolve) => setTimeout(resolve, 15_000));
   }
 }
 

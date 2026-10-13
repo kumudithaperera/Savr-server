@@ -380,8 +380,66 @@ describe('improve daily circuit breaker', () => {
     // Spending the improve ceiling must not close the separate extract ceiling:
     // /improve costs Gemini only, never the Apify credit /extract is sized on.
     expect((await improve(app)).statusCode).toBe(200);
-    expect((await improve(app)).statusCode).toBe(503);
+    expect((await improve(app, 'healthier')).statusCode).toBe(503);
     expect((await extract(app, TIKTOK(1))).statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+describe('blog recipes with complete JSON-LD', () => {
+  it('extracts with no model call and reports it in /health', async () => {
+    const webScraper = {
+      scrape: vi.fn(async () => ({
+        caption: 'Title: Pancakes',
+        structured: { ...parsed, title: 'Site pancakes', macrosStatedInCaption: true },
+        totalMinutes: 25,
+      })),
+    };
+    const deps = makeDeps({ webScraper });
+    const app = buildApp(deps);
+
+    const res = await extract(app, 'https://example.com/recipes/site-pancakes');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ title: 'Site pancakes', macrosSource: 'caption' });
+    expect(deps.parser.parse).not.toHaveBeenCalled();
+
+    const health = (await app.inject({ method: 'GET', url: '/health' })).json();
+    expect(health.ai.saved.jsonLdParse).toBe(1);
+    expect(health.ai.calls.geminiText).toBe(0);
+    await app.close();
+  });
+});
+
+describe('improve cache and per-device cap', () => {
+  it('answers a repeat of the same request from the cache, free', async () => {
+    const improver = stubImprover();
+    const app = buildApp(makeDeps({ improver, globalDailyImproveLimit: 1 }));
+
+    const first = await improve(app);
+    const second = await improve(app);
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    // One model call, and the day's single allowance is still the only one spent.
+    expect(improver.suggestSubstitutes).toHaveBeenCalledOnce();
+    expect((await improve(app, 'healthier')).statusCode).toBe(503);
+    await app.close();
+  });
+
+  it('caps one install before it can spend the shared ceiling', async () => {
+    const app = buildApp(makeDeps({ improver: stubImprover(), globalDailyImproveLimit: 1000, deviceDailyImproveLimit: 1 }));
+    const call = (device: string, goal: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/improve',
+        headers: { 'x-morsel-device-id': device },
+        payload: { mode: 'healthier', recipe: RECIPE, goal },
+      });
+
+    expect((await call('phone-a', 'less fat')).statusCode).toBe(200);
+    const over = await call('phone-a', 'less sugar');
+    expect(over.statusCode).toBe(429);
+    expect(over.json().code).toBe('rate_limited');
+    expect((await call('phone-b', 'less sugar')).statusCode).toBe(200);
     await app.close();
   });
 });
@@ -418,7 +476,7 @@ describe('unextractable links', () => {
 });
 
 describe('caching invariant: only a confident parse is stored', () => {
-  it('does not cache a link whose caption held no recipe', async () => {
+  it('does not cache a link whose caption held no recipe as a recipe', async () => {
     // The parser reports "this is not a recipe" rather than improvising.
     const parser = { parse: vi.fn(async () => ({ ...parsed, isRecipe: false })) };
     const deps = makeDeps({ parser });
@@ -429,11 +487,14 @@ describe('caching invariant: only a confident parse is stored', () => {
 
     expect(first.statusCode).toBe(422);
     expect(first.json().code).toBe('not_a_recipe');
-    // Second attempt must fail the same way. If the rejection had been cached -
-    // or worse, an invented recipe had been - this would return 200 and serve
-    // that guess to everyone who pastes the link for the next year.
+    // Second attempt must fail the same way. Had an invented recipe been
+    // cached, this would return 200 and serve that guess to everyone who
+    // pastes the link for the next year. The *failure* is remembered for a
+    // week instead, so the repeat costs no model call.
     expect(second.statusCode).toBe(422);
-    expect(parser.parse).toHaveBeenCalledTimes(2);
+    expect(second.json().code).toBe('not_a_recipe');
+    expect(second.json().message).toBe(first.json().message);
+    expect(parser.parse).toHaveBeenCalledTimes(1);
     await app.close();
   });
 

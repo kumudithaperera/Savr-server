@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
-import { generateContentWithRetry } from '../lib/geminiFetch.js';
+import { generateContentWithRetry, thinkingOff } from '../lib/geminiFetch.js';
+import { FACET_GUIDE, FACET_SCHEMA_PROPERTIES } from '../lib/facet-rules.js';
 import { CATEGORIES, type ParsedRecipe } from '../lib/types.js';
 import { validateParsedRecipe } from '../lib/validate.js';
 
@@ -29,6 +30,7 @@ const RESPONSE_SCHEMA = {
     },
     macrosStatedInCaption: { type: 'boolean' },
     suggestedCategory: { type: 'string', enum: [...CATEGORIES] },
+    ...FACET_SCHEMA_PROPERTIES,
   },
   required: [
     'isRecipe',
@@ -38,6 +40,8 @@ const RESPONSE_SCHEMA = {
     'macros',
     'macrosStatedInCaption',
     'suggestedCategory',
+    'dietTags',
+    'totalMinutes',
   ],
 } as const;
 
@@ -62,7 +66,10 @@ Rules:
 Language and wording - preserve the source, do not normalize it:
 - Write title, ingredients and steps in the SAME language as the source text. Never translate.
 - Name each ingredient exactly as the source names it. "haldi" stays "haldi", "atta" stays "atta", "besan" stays "besan" - never substitute a Western equivalent like "turmeric" or "whole wheat flour".
-- Keep quantities and units exactly as written, including local measures (katori, tola, mutthi, inch) and non-numeric amounts ("to taste", "as required", "a pinch").`;
+- Keep quantities and units exactly as written, including local measures (katori, tola, mutthi, inch) and non-numeric amounts ("to taste", "as required", "a pinch").
+
+Search tags (judge the recipe as written; these never change the fields above):
+${FACET_GUIDE}`;
 
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
@@ -90,6 +97,7 @@ export function createGeminiRecipeParser(
           responseMimeType: 'application/json',
           responseSchema: RESPONSE_SCHEMA,
           temperature: 0.2,
+          ...thinkingOff(config.geminiModel),
         },
       });
 

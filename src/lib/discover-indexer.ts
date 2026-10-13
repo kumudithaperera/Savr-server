@@ -1,8 +1,8 @@
-import type { ClassifyInput, RecipeClassifier } from '../services/classify.js';
+import { AI_CACHE_TTL_SECONDS, facetsCacheKey } from './ai-cache.js';
+import { countAi } from './ai-stats.js';
+import { deriveFacets } from './facet-rules.js';
 import type { ImageRehoster } from '../services/rehost.js';
 import type { DiscoverDb } from './discover-db.js';
-import type { RecipeFeedDb } from './recipe-feed-db.js';
-import { DAY_TTL_SECONDS, dayKey } from './period.js';
 import { facetColumns, type RecipeFacets } from './recipe-facets.js';
 import type { Store } from './store.js';
 import type { ExtractedRecipe } from './types.js';
@@ -13,7 +13,7 @@ import { publicSourceUrl } from './url.js';
  *
  * Called fire-and-forget from `/extract` after a validated cache fill, and by
  * the backfill script. Nothing here may fail an extraction: every error is
- * logged and swallowed.
+ * logged and swallowed. Tagging never calls a model (`deriveFacets`).
  */
 
 export interface Logger {
@@ -21,32 +21,26 @@ export interface Logger {
   warn(obj: object, msg: string): void;
 }
 
-export interface ClassifyBudget {
-  store: Store;
-  classifier?: RecipeClassifier;
-  /** Service-wide classify calls per UTC day; its own budget, not `/improve`'s. */
-  dailyClassifyLimit: number;
-}
+type RecipeBody = { ingredients: readonly string[]; steps: readonly string[] };
 
 /**
- * Classifies under the daily ceiling. Null = over budget, no classifier, or the
- * call failed; the caller stores null facets and the sweep retries later.
- * Counted per attempt, like `/improve`, because a failed Gemini call is still
- * billed against the project's quota.
+ * Tags a model already gave this recipe body (an extraction, or a share's
+ * moderation call), for the next copy of it: a remix or a re-share.
  */
-export async function classifyWithinBudget(
-  budget: ClassifyBudget,
-  recipe: ClassifyInput,
-  log?: Logger,
-): Promise<RecipeFacets | null> {
-  if (!budget.classifier) return null;
-  const today = await budget.store.incrWithTtl(`g:day:classify:${dayKey(new Date())}`, DAY_TTL_SECONDS);
-  if (today > budget.dailyClassifyLimit) return null;
+export async function knownFacets(store: Store, recipe: RecipeBody): Promise<RecipeFacets | null> {
   try {
-    return await budget.classifier.classify(recipe);
-  } catch (error) {
-    log?.warn({ err: (error as Error).message }, 'classify failed');
+    return (await store.getJson<RecipeFacets>(facetsCacheKey(recipe))) ?? null;
+  } catch {
     return null;
+  }
+}
+
+/** Stores a model's tags for this recipe body. */
+export async function rememberFacets(store: Store, recipe: RecipeBody, facets: RecipeFacets): Promise<void> {
+  try {
+    await store.setJson(facetsCacheKey(recipe), facets, AI_CACHE_TTL_SECONDS);
+  } catch {
+    // the cache is an optimisation
   }
 }
 
@@ -55,21 +49,34 @@ export interface DiscoverIndexer {
    * Indexes one extraction. `creator` is the scraper's owner username, when
    * known. Resolves to whether a row was written; never rejects.
    */
-  index(canonical: string, recipe: ExtractedRecipe, creator?: string, log?: Logger): Promise<boolean>;
-  /** Classifies up to `limit` untagged rows. Returns how many were tagged. */
+  index(
+    canonical: string,
+    recipe: ExtractedRecipe,
+    creator?: string,
+    log?: Logger,
+    /** Tags the extraction's own model call returned, if any. */
+    facets?: RecipeFacets | null,
+    /** The page's own stated total time (JSON-LD), which beats an estimate. */
+    statedMinutes?: number | null,
+  ): Promise<boolean>;
+  /**
+   * Tags up to `limit` rows written before tagging moved to rules. No model
+   * call. Returns how many were tagged.
+   */
   sweep(limit: number, log?: Logger): Promise<number>;
 }
 
-export interface IndexerDeps extends ClassifyBudget {
+export interface IndexerDeps {
   db: DiscoverDb;
   rehoster: ImageRehoster;
+  store: Store;
 }
 
 export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
   const { db } = deps;
 
   return {
-    async index(canonical, recipe, creator, log) {
+    async index(canonical, recipe, creator, log, facets, statedMinutes) {
       if (!db.configured) return false;
       try {
         // Not publishable (a web link with a private-looking query, an
@@ -95,10 +102,19 @@ export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
           ...facetColumns(recipe, null),
         });
 
+        // Tagged from the extraction's own answer, else from a copy a model
+        // already tagged, else by the word lists alone.
         const row = await db.getByKey(canonical);
         if (row && !row.classified_at) {
-          const facets = await classifyWithinBudget(deps, recipe, log);
-          if (facets) await db.setFacets(canonical, facets);
+          let model = facets ?? null;
+          if (model) {
+            await countAi(deps.store, 'facetsFromExtraction');
+            await rememberFacets(deps.store, recipe, model);
+          } else {
+            model = await knownFacets(deps.store, recipe);
+            await countAi(deps.store, model ? 'facetsCacheHit' : 'facetsFromRules');
+          }
+          await db.setFacets(canonical, deriveFacets(recipe, model, statedMinutes));
         }
         return true;
       } catch (error) {
@@ -108,13 +124,12 @@ export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
     },
 
     async sweep(limit, log) {
-      if (!db.configured || !deps.classifier) return 0;
+      if (!db.configured) return 0;
       let tagged = 0;
       try {
         for (const row of await db.unclassified(limit)) {
-          const facets = await classifyWithinBudget(deps, row.recipe, log);
-          if (!facets) break; // over budget or failing: try again next sweep
-          await db.setFacets(row.canonical_key, facets);
+          const model = await knownFacets(deps.store, row.recipe);
+          await db.setFacets(row.canonical_key, deriveFacets(row.recipe, model));
           tagged++;
         }
       } catch (error) {
@@ -123,30 +138,4 @@ export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
       return tagged;
     },
   };
-}
-
-/**
- * The same retry for community posts: a share whose classify call failed
- * (usually a Gemini rate limit right after its moderation call) is tagged
- * later instead of never. Returns how many were tagged; never rejects.
- */
-export async function sweepUntaggedPosts(
-  db: RecipeFeedDb,
-  budget: ClassifyBudget,
-  limit: number,
-  log?: Logger,
-): Promise<number> {
-  if (!db.configured || !budget.classifier) return 0;
-  let tagged = 0;
-  try {
-    for (const post of await db.untagged(limit)) {
-      const facets = await classifyWithinBudget(budget, post.recipe, log);
-      if (!facets) break;
-      await db.setFacets(post.id, facets);
-      tagged++;
-    }
-  } catch (error) {
-    log?.warn({ err: (error as Error).message }, 'feed: tag sweep failed');
-  }
-  return tagged;
 }

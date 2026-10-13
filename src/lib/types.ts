@@ -47,6 +47,13 @@ export interface ScrapedPost {
   shortcode?: string;
   /** Direct video URL when available, for video-understanding fallback. */
   videoUrl?: string;
+  /**
+   * A blog's JSON-LD recipe when it is complete enough to use without any AI
+   * call (`services/web.ts` `structuredRecipe`). Set only by the web scraper.
+   */
+  structured?: ParsedRecipe;
+  /** The author's stated total time (JSON-LD `totalTime`), in minutes. */
+  totalMinutes?: number;
 }
 
 /** Why the video fallback was triggered. */
@@ -89,6 +96,13 @@ export interface ParsedRecipe {
   macros: Macros;
   macrosStatedInCaption: boolean;
   suggestedCategory: Category;
+  /**
+   * Discover tags, returned by the same call so indexing needs no separate
+   * request. Optional and untrusted: `facetsFromParsed` keeps only valid
+   * values, and anything missing is left to the rules (`deriveFacets`).
+   */
+  dietTags?: string[];
+  totalMinutes?: number;
 }
 
 /**

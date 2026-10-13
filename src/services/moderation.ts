@@ -1,6 +1,11 @@
 import type { Config } from '../config.js';
-import { generateContentWithRetry } from '../lib/geminiFetch.js';
+import { countAi } from '../lib/ai-stats.js';
+import { AI_CACHE_TTL_SECONDS, moderationCacheKey } from '../lib/ai-cache.js';
+import { generateContentWithRetry, thinkingOff } from '../lib/geminiFetch.js';
 import { upstreamError } from '../lib/errors.js';
+import { FACET_GUIDE, FACET_SCHEMA_PROPERTIES, facetsFromParsed } from '../lib/facet-rules.js';
+import type { RecipeFacets } from '../lib/recipe-facets.js';
+import type { Store } from '../lib/store.js';
 
 /**
  * Pre-publication screening for the community board.
@@ -19,7 +24,11 @@ import { upstreamError } from '../lib/errors.js';
  */
 
 export type ModerationVerdict =
-  | { allowed: true }
+  | {
+      allowed: true;
+      /** Search tags, when the caller asked for them (`ReviewOptions.facets`). */
+      facets?: RecipeFacets;
+    }
   | {
       allowed: false;
       /** Short machine code for logs and the admin; never shown verbatim. */
@@ -39,9 +48,17 @@ export interface ModerationImage {
   data: string;
 }
 
+export interface ReviewOptions {
+  /**
+   * Also tag the recipe (vegetarian/vegan, time) in the same request, so a
+   * share that needs both costs one call instead of two. Recipe kind only.
+   */
+  facets?: boolean;
+}
+
 export interface ContentModerator {
   /** Throws (upstream error) when the check could not run. The caller decides fail-open/closed. */
-  review(text: string, kind: ModerationKind, image?: ModerationImage): Promise<ModerationVerdict>;
+  review(text: string, kind: ModerationKind, image?: ModerationImage, options?: ReviewOptions): Promise<ModerationVerdict>;
 }
 
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
@@ -94,6 +111,22 @@ const VERDICT_SCHEMA = {
   },
   required: ['verdict', 'category'],
 } as const;
+
+const VERDICT_WITH_FACETS_SCHEMA = {
+  type: 'object',
+  properties: {
+    ...VERDICT_SCHEMA.properties,
+    facets: {
+      type: 'object',
+      properties: FACET_SCHEMA_PROPERTIES,
+      required: ['dietTags', 'totalMinutes'],
+    },
+  },
+  required: ['verdict', 'category', 'facets'],
+} as const;
+
+const FACETS_INSTRUCTION = `Also return "facets": search tags for the recipe, judged as written (they never affect the verdict):
+${FACET_GUIDE}`;
 
 const MODERATION_PROMPT = `You moderate a public feature-request board inside Morsel, a recipe-saving app. Users post ideas for the app and comment on each other's ideas. Posts are anonymous.
 
@@ -152,7 +185,9 @@ export function createGeminiModerator(
   retryDelayMs?: number,
 ): ContentModerator {
   return {
-    async review(text, kind, image) {
+    async review(text, kind, image, options) {
+      const withFacets = Boolean(options?.facets) && kind === 'recipe';
+      const prompt = kind === 'recipe' || kind === 'suggestion' ? RECIPE_MODERATION_PROMPT : MODERATION_PROMPT;
       const endpoint =
         `https://generativelanguage.googleapis.com/v1beta/models/` +
         `${config.geminiModel}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`;
@@ -162,7 +197,7 @@ export function createGeminiModerator(
         JSON.stringify({
           systemInstruction: {
             parts: [
-              { text: kind === 'recipe' || kind === 'suggestion' ? RECIPE_MODERATION_PROMPT : MODERATION_PROMPT },
+              { text: withFacets ? `${prompt}\n\n${FACETS_INSTRUCTION}` : prompt },
             ],
           },
           contents: [
@@ -184,8 +219,9 @@ export function createGeminiModerator(
           ],
           generationConfig: {
             responseMimeType: 'application/json',
-            responseSchema: VERDICT_SCHEMA,
+            responseSchema: withFacets ? VERDICT_WITH_FACETS_SCHEMA : VERDICT_SCHEMA,
             temperature: 0,
+            ...thinkingOff(config.geminiModel),
           },
         }),
         fetchImpl,
@@ -204,14 +240,17 @@ export function createGeminiModerator(
         return { allowed: false, category: 'blocked_by_model' };
       }
 
-      let parsed: { verdict?: unknown; category?: unknown };
+      let parsed: { verdict?: unknown; category?: unknown; facets?: unknown };
       try {
         parsed = JSON.parse(raw) as typeof parsed;
       } catch {
         throw upstreamError('Gemini moderation returned malformed JSON');
       }
 
-      if (parsed.verdict === 'allow') return { allowed: true };
+      if (parsed.verdict === 'allow') {
+        const facets = withFacets ? facetsFromParsed(parsed.facets) : null;
+        return facets ? { allowed: true, facets } : { allowed: true };
+      }
       if (parsed.verdict === 'reject') {
         return {
           allowed: false,
@@ -219,6 +258,36 @@ export function createGeminiModerator(
         };
       }
       throw upstreamError('Gemini moderation returned no verdict');
+    },
+  };
+}
+
+/**
+ * Remembers *allowed* verdicts for 30 days, keyed on the exact text, kind and
+ * photo judged. An unchanged re-share, a reused display name or a repeated
+ * suggestion then costs no call. A rejection is never cached, so it is judged
+ * again (and can pass once a prompt or a policy changes). A cached verdict
+ * without tags still costs a call when tags are asked for.
+ */
+export function withModerationCache(moderator: ContentModerator, store: Store): ContentModerator {
+  return {
+    async review(text, kind, image, options) {
+      const key = moderationCacheKey(kind, text, image?.data);
+      const cached = await store.getJson<{ facets?: RecipeFacets }>(key);
+      if (cached && (!options?.facets || cached.facets)) {
+        await countAi(store, 'moderateCacheHit');
+        return cached.facets ? { allowed: true, facets: cached.facets } : { allowed: true };
+      }
+      await countAi(store, 'moderate');
+      const verdict = await moderator.review(text, kind, image, options);
+      if (verdict.allowed) {
+        try {
+          await store.setJson(key, verdict.facets ? { facets: verdict.facets } : {}, AI_CACHE_TTL_SECONDS);
+        } catch {
+          // the cache is an optimisation
+        }
+      }
+      return verdict;
     },
   };
 }

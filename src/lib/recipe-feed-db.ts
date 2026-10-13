@@ -15,7 +15,6 @@ import {
   filterParams,
   matchesFilters,
   type FacetColumns,
-  type RecipeFacets,
   type RecipeFilters,
 } from './recipe-facets.js';
 import type { Macros } from './types.js';
@@ -122,13 +121,6 @@ export interface RecipeFeedDb {
   }): Promise<FeedCommentRow>;
   removeComment(id: string): Promise<void>;
   setApplied(id: string, applied: boolean): Promise<void>;
-  /**
-   * Visible posts from the last week whose classify call failed (no
-   * difficulty), oldest first, for the retry sweep. The week bound stops a
-   * recipe the model can't grade from being retried forever.
-   */
-  untagged(limit: number): Promise<FeedPostRow[]>;
-  setFacets(id: string, facets: RecipeFacets): Promise<void>;
   insertReport(row: {
     target_type: FeedTarget;
     target_id: string;
@@ -137,9 +129,6 @@ export interface RecipeFeedDb {
     note: string | null;
   }): Promise<'recorded' | 'duplicate'>;
 }
-
-/** How far back the tag sweep looks for posts that missed classification. */
-const UNTAGGED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 const ORDER: Record<FeedSort, string> = {
   new: 'created_at.desc',
@@ -250,26 +239,6 @@ export function createSupabaseRecipeFeedDb(
         method: 'PATCH',
         headers: { prefer: 'return=minimal' },
         body: JSON.stringify({ applied }),
-      });
-    },
-
-    async untagged(limit) {
-      const since = new Date(Date.now() - UNTAGGED_WINDOW_MS).toISOString();
-      return db.request<FeedPostRow[]>(
-        `recipe_posts?select=*&difficulty=is.null&${visible}&created_at=gte.${enc(since)}` +
-          `&order=created_at.asc&limit=${limit}`,
-      );
-    },
-
-    async setFacets(id, facets) {
-      await db.request(`recipe_posts?id=eq.${enc(id)}`, {
-        method: 'PATCH',
-        headers: { prefer: 'return=minimal' },
-        body: JSON.stringify({
-          diet_tags: facets.dietTags,
-          total_minutes: facets.totalMinutes,
-          difficulty: facets.difficulty,
-        }),
       });
     },
 
@@ -415,23 +384,6 @@ export function createMemoryRecipeFeedDb(): RecipeFeedDb & {
       if (comment) comment.applied = applied;
     },
 
-    async untagged(limit) {
-      const since = new Date(Date.now() - UNTAGGED_WINDOW_MS).toISOString();
-      return [...posts.values()]
-        .filter((p) => isVisible(p) && p.difficulty === null && p.created_at >= since)
-        .sort((a, b) => a.created_at.localeCompare(b.created_at))
-        .slice(0, limit)
-        .map(copy);
-    },
-
-    async setFacets(id, facets) {
-      const post = posts.get(id);
-      if (!post) return;
-      post.diet_tags = facets.dietTags;
-      post.total_minutes = facets.totalMinutes;
-      post.difficulty = facets.difficulty;
-    },
-
     async insertReport(row) {
       const key = `${row.target_type}|${row.target_id}|${row.reporter_hash}`;
       if (reports.has(key)) return 'duplicate';
@@ -471,8 +423,6 @@ export function createUnconfiguredRecipeFeedDb(): RecipeFeedDb {
     insertComment: refuse,
     removeComment: refuse,
     setApplied: refuse,
-    untagged: refuse,
-    setFacets: refuse,
     insertReport: refuse,
   };
 }

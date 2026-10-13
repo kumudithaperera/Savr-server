@@ -1,5 +1,6 @@
 import type { Config } from '../config.js';
 import { unprocessable, upstreamError } from '../lib/errors.js';
+import { thinkingOff } from '../lib/geminiFetch.js';
 import type {
   AdjustmentInput,
   AdjustmentResult,
@@ -219,6 +220,7 @@ export function createGeminiRecipeImprover(
             responseMimeType: 'application/json',
             responseSchema,
             temperature: 0.4,
+            ...thinkingOff(config.geminiModel),
           },
         }),
       });

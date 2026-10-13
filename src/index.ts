@@ -3,7 +3,6 @@ import { loadConfig } from './config.js';
 import { createMemoryCommunityDb, createSupabaseCommunityDb } from './lib/community-db.js';
 import { createMemoryDiscoverDb, createSupabaseDiscoverDb } from './lib/discover-db.js';
 import { createMemoryRecipeFeedDb, createSupabaseRecipeFeedDb } from './lib/recipe-feed-db.js';
-import { createGeminiClassifier } from './services/classify.js';
 import { createPassthroughRehoster, createSupabaseImageRehoster } from './services/rehost.js';
 import { SEED_POSTS } from './lib/community-seed.js';
 import { createStore } from './lib/store.js';
@@ -65,12 +64,10 @@ const app = buildApp({
   communityHashPepper: config.communityHashPepper,
   discoverDb: discoverInMemory ? createMemoryDiscoverDb() : createSupabaseDiscoverDb(serviceRole),
   recipeFeedDb: discoverInMemory ? createMemoryRecipeFeedDb() : createSupabaseRecipeFeedDb(serviceRole),
-  classifier: createGeminiClassifier({ geminiApiKey: config.geminiApiKey, geminiModel: config.geminiLightModel }),
   rehoster:
     discoverInMemory || !config.supabaseServiceRoleKey
       ? createPassthroughRehoster()
       : createSupabaseImageRehoster({ ...serviceRole, bucket: config.communityImageBucket }),
-  globalDailyClassifyLimit: config.globalDailyClassifyLimit,
   discoverSweepMs: 30 * 60 * 1000,
   limits: {
     monthlyDeviceExtractionLimit: config.monthlyDeviceExtractionLimit,
@@ -83,6 +80,7 @@ const app = buildApp({
     plusGrantDays: config.plusGrantDays,
   },
   globalDailyImproveLimit: config.globalDailyImproveLimit,
+  deviceDailyImproveLimit: config.deviceDailyImproveLimit,
   rateLimit: { max: config.ipRateLimitMax, windowMs: config.ipRateLimitWindowMs },
 });
 
