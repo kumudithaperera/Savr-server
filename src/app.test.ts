@@ -111,6 +111,18 @@ describe('guardrail', () => {
     expect(res.statusCode).toBe(200);
     await app.close();
   });
+
+  it('reports on /health whether the app key is configured, never its value', async () => {
+    const guarded = buildApp(makeDeps({ appSharedSecret: 'sekret' }));
+    const res = await guarded.inject({ method: 'GET', url: '/health' });
+    expect(res.json().appKey).toBe(true);
+    expect(res.body).not.toContain('sekret');
+    await guarded.close();
+
+    const open = buildApp(makeDeps({ appSharedSecret: '' }));
+    expect((await open.inject({ method: 'GET', url: '/health' })).json().appKey).toBe(false);
+    await open.close();
+  });
 });
 
 // --- metering -------------------------------------------------------------

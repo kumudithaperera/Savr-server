@@ -139,6 +139,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // exactly like a healthy server that happens to enforce nothing. Absent field
   // = an older build is still running. No credentials are exposed.
   //
+  // `appKey` says whether the shared-secret guard is configured. It is strictly
+  // a boolean - never the value, a prefix, a length or a hash - because /health
+  // is public. It tells a missing APP_SHARED_SECRET apart from a mismatched one.
+  //
   // `cache` is this month's hit rate. On the free Apify tier that number decides
   // how far $5 stretches: every hit is an extraction nobody paid for.
   app.get('/health', async () => {
@@ -174,6 +178,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return {
       status: 'ok',
       store: store.kind,
+      appKey: Boolean(deps.appSharedSecret),
       cache: {
         month: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`,
         hits: hit,

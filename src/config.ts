@@ -227,6 +227,15 @@ export interface Config {
   geminiLightModel: string;
 }
 
+/**
+ * Reads a secret or URL with surrounding whitespace removed. A trailing newline
+ * pasted into the Render field otherwise becomes part of the value, and the
+ * app-key comparison then fails for every caller with no diagnostic (MORSE-74).
+ */
+function trimmedFromEnv(name: string): string {
+  return (process.env[name] ?? '').trim();
+}
+
 /** Reads a positive integer env var, falling back when unset or malformed. */
 function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -280,13 +289,13 @@ export function loadConfig(): Config {
     deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? '',
     deepseekModel: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat',
     deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-    pexelsApiKey: process.env.PEXELS_API_KEY ?? '',
-    usdaApiKey: process.env.USDA_API_KEY ?? '',
+    pexelsApiKey: trimmedFromEnv('PEXELS_API_KEY'),
+    usdaApiKey: trimmedFromEnv('USDA_API_KEY'),
     offContactEmail: process.env.OFF_CONTACT_EMAIL ?? '',
     port: Number(process.env.PORT ?? 3000),
-    appSharedSecret: process.env.APP_SHARED_SECRET ?? '',
-    upstashUrl: process.env.UPSTASH_REDIS_REST_URL ?? '',
-    upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN ?? '',
+    appSharedSecret: trimmedFromEnv('APP_SHARED_SECRET'),
+    upstashUrl: trimmedFromEnv('UPSTASH_REDIS_REST_URL'),
+    upstashToken: trimmedFromEnv('UPSTASH_REDIS_REST_TOKEN'),
     monthlyDeviceExtractionLimit: numberFromEnv('MONTHLY_DEVICE_EXTRACTION_LIMIT', 30),
     plusDeviceExtractionLimit: numberFromEnv('PLUS_DEVICE_EXTRACTION_LIMIT', 200),
     plusRedeemCodes: codeListFromEnv('PLUS_REDEEM_CODES'),
