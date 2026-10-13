@@ -74,15 +74,14 @@ export function createDiscoverIndexer(deps: IndexerDeps): DiscoverIndexer {
         // Not publishable (a web link with a private-looking query, an
         // unrecognised shape): it stays a private cache entry only.
         const handle = creator && /^[A-Za-z0-9._]{1,40}$/.test(creator) ? creator : null;
-        const sourceUrl = publicSourceUrl(canonical, handle);
+        const sourceUrl = publicSourceUrl(canonical, handle, recipe.sourceUrl);
         if (!sourceUrl) return false;
 
+        // Only an Instagram/TikTok thumbnail copied into our bucket is shown in
+        // search. A blog's own photo stays in `recipe` and is downloaded by the
+        // app only after someone saves it (see services/rehost.ts for why).
         const imageUrl = await deps.rehoster.rehost(recipe.imageRemoteUrl);
-        const publicRecipe: ExtractedRecipe = {
-          ...recipe,
-          sourceUrl,
-          imageRemoteUrl: imageUrl ?? undefined,
-        };
+        const publicRecipe: ExtractedRecipe = { ...recipe, sourceUrl };
         await db.upsert({
           canonical_key: canonical,
           source_url: sourceUrl,

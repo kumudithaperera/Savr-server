@@ -25,14 +25,14 @@ import type {
 import type { Store } from '../lib/store.js';
 import { CATEGORIES, type Category } from '../lib/types.js';
 import { publicShareUrl } from '../lib/url.js';
-import type { PhotoSearch } from '../services/images.js';
 import {
   localCheck,
   recipeBodyCheck,
   type ContentModerator,
+  type ModerationImage,
   type ModerationKind,
 } from '../services/moderation.js';
-import type { ImageRehoster } from '../services/rehost.js';
+import { MAX_IMAGE_BYTES, sniffImageType, type ImageRehoster, type UploadedImage } from '../services/rehost.js';
 
 /**
  * The community recipe feed: people share recipes from their library, others
@@ -52,7 +52,15 @@ import type { ImageRehoster } from '../services/rehost.js';
  *
  * **Credit.** A recipe that came from a link keeps a cleaned link to it
  * (`publicShareUrl`: no share ids, no private-looking query strings).
+ *
+ * **Photos.** Only a photo the app uploads with the post (moderated with it)
+ * or a copied Instagram/TikTok thumbnail is published - both from our own
+ * bucket. Any other image URL is dropped and the app shows a placeholder, so
+ * viewing the feed never makes a phone call a host someone else chose.
  */
+
+/** Largest request body for share / re-share: a base64 photo plus the recipe. */
+export const FEED_BODY_LIMIT = 8 * 1024 * 1024;
 
 export interface RecipeFeedOptions extends ClassifyBudget {
   db: RecipeFeedDb;
@@ -60,8 +68,6 @@ export interface RecipeFeedOptions extends ClassifyBudget {
   communityDb: CommunityDb;
   moderator?: ContentModerator;
   rehoster: ImageRehoster;
-  /** Fallback photo when the shared one can't be kept. */
-  photoSearch?: PhotoSearch;
   hashPepper: string;
 }
 
@@ -133,6 +139,27 @@ function lines(raw: unknown, maxItems: number, maxLength: number, what: string):
   if (items.length > maxItems) throw badRequest(`A recipe can have at most ${maxItems} ${what}.`);
   if (items.some((line) => line.length > maxLength)) throw badRequest(`One of the ${what} is too long.`);
   return items;
+}
+
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * The photo uploaded with a share (`{ mimeType, data }`, base64). The bytes'
+ * own signature decides the type; the claimed mimeType is ignored. Absent =
+ * null; present but unusable = 400, so the person learns the photo was
+ * refused instead of it silently vanishing.
+ */
+function parseUpload(raw: unknown): UploadedImage | null {
+  if (raw == null) return null;
+  const data = (raw as { data?: unknown }).data;
+  if (typeof data !== 'string' || data.length === 0 || data.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4) {
+    throw badRequest('That photo is too large to share.');
+  }
+  if (!BASE64.test(data)) throw badRequest('That photo could not be read.');
+  const bytes = Buffer.from(data, 'base64');
+  const mimeType = sniffImageType(bytes);
+  if (!mimeType) throw badRequest('Photos must be JPEG, PNG or WebP.');
+  return { bytes, mimeType };
 }
 
 /** Validates the recipe someone is sharing. Returns it plus the photo to keep. */
@@ -269,6 +296,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     body: string,
     kind: Extract<ModerationKind, 'recipe' | 'suggestion'>,
     request: FastifyRequest,
+    image?: ModerationImage,
   ): Promise<boolean> {
     for (const verdict of [localCheck(typed), recipeBodyCheck(body)]) {
       if (!verdict.allowed) {
@@ -278,7 +306,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     }
     if (!moderator) return false;
     try {
-      const verdict = await moderator.review(body ? `${typed}\n\n${body}` : typed, kind);
+      const verdict = await moderator.review(body ? `${typed}\n\n${body}` : typed, kind, image);
       if (!verdict.allowed) {
         request.log.info({ category: verdict.category, kind }, 'feed: rejected by moderator');
         throw rejected();
@@ -308,25 +336,33 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const note = cleanText(body.note, { singleLine: false });
     if (note.length > FEED_LIMITS.noteMax) throw badRequest(`Notes can be at most ${FEED_LIMITS.noteMax} characters.`);
     const authorName = cleanDisplayName(body.authorName);
-    return { body, recipe, imageUrl, note, authorName };
+    const upload = parseUpload(body.image);
+    return { body, recipe, imageUrl, upload, note, authorName };
   }
 
   async function enrich(
     request: FastifyRequest,
     input: Awaited<ReturnType<typeof prepare>>,
   ) {
-    const { recipe, imageUrl, note, authorName } = input;
+    const { recipe, imageUrl, upload, note, authorName } = input;
     const typed = [authorName ? `Display name: ${authorName}` : '', `Title: ${recipe.title}`, note ? `Note: ${note}` : '']
       .filter(Boolean)
       .join('\n');
     const content = [...recipe.ingredients, ...recipe.steps].join('\n');
-    const needsReview = await screen(typed, content, 'recipe', request);
+    const needsReview = await screen(
+      typed,
+      content,
+      'recipe',
+      request,
+      upload ? { mimeType: upload.mimeType, data: upload.bytes.toString('base64') } : undefined,
+    );
 
-    const [facets, keptImage] = await Promise.all([
+    // Their own (moderated) photo first, else a copied Instagram/TikTok
+    // thumbnail, else none - the app draws a placeholder.
+    const [facets, image] = await Promise.all([
       classifyWithinBudget(deps, recipe, request.log),
-      deps.rehoster.rehost(imageUrl),
+      upload ? deps.rehoster.storeUpload(upload) : deps.rehoster.rehost(imageUrl),
     ]);
-    const image = keptImage ?? (deps.photoSearch ? await deps.photoSearch.search(recipe.title).catch(() => null) : null);
 
     return {
       author_name: authorName,
@@ -394,7 +430,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
 
   // --- writes -----------------------------------------------------------------
 
-  app.post('/community/recipes', async (request, reply) => {
+  app.post('/community/recipes', { bodyLimit: FEED_BODY_LIMIT }, async (request, reply) => {
     const input = await prepare(request);
     const remixOf = input.body.remixOf == null ? null : requireUuid(input.body.remixOf, 'original recipe');
     const me = await writer(request, 'post');
@@ -406,7 +442,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     return reply.status(201).send({ post: toPostDto(row, me) });
   });
 
-  app.put('/community/recipes/:id', async (request) => {
+  app.put('/community/recipes/:id', { bodyLimit: FEED_BODY_LIMIT }, async (request) => {
     const id = requireUuid((request.params as { id?: string }).id, 'recipe');
     const input = await prepare(request);
     const me = await writer(request, 'update');
@@ -415,7 +451,8 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     if (!post || post.author_hash !== me || post.removed) throw notFound();
 
     const columns = await enrich(request, input);
-    const row = await db.update(id, columns);
+    // A re-share without a new photo keeps the one already published.
+    const row = await db.update(id, { ...columns, image_url: columns.image_url ?? post.image_url });
     if (!row) throw notFound();
     return { post: toPostDto(row, me) };
   });

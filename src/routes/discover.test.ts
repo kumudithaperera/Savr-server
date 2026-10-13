@@ -88,6 +88,13 @@ describe('publicSourceUrl', () => {
     expect(publicSourceUrl('raw:not a url')).toBeNull();
   });
 
+  it('keeps the host the site actually serves (www) while dropping tracking', () => {
+    expect(
+      publicSourceUrl('web:example.com/curry', null, 'https://www.example.com/curry?utm_source=ig#step-2'),
+    ).toBe('https://www.example.com/curry');
+    expect(publicSourceUrl('web:example.com/curry?token=x', null, 'https://www.example.com/curry?token=x')).toBeNull();
+  });
+
   it('strips a private-looking query from a shared link instead of refusing it', () => {
     expect(publicShareUrl('https://example.com/recipe?session=abc&utm_source=x', 'web')).toBe(
       'https://example.com/recipe',
@@ -209,5 +216,14 @@ describe('discover routes', () => {
     const { createHash } = await import('node:crypto');
     communityDb.admin.ban(createHash('sha256').update(`${PEPPER}:mallory`).digest('hex'));
     expect((await as('mallory').post(`/discover/items/${other.id}/save`)).statusCode).toBe(403);
+  });
+
+  it('shows no third-party photo in search, but hands it out on save', async () => {
+    const { db, indexer, as } = setup();
+    await indexer.index('web:example.com/salad', recipe({ sourcePlatform: 'web', imageRemoteUrl: 'https://example.com/salad.jpg' }));
+    const [item] = (await as(null).get('/discover/search')).json().items;
+    expect(item.imageUrl).toBeNull();
+    const saved = (await as('alice').post(`/discover/items/${db.admin.rows()[0].id}/save`)).json();
+    expect(saved.recipe.imageRemoteUrl).toBe('https://example.com/salad.jpg');
   });
 });

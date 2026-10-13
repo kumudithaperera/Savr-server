@@ -32,9 +32,16 @@ export type ModerationVerdict =
  */
 export type ModerationKind = 'post' | 'comment' | 'recipe' | 'suggestion';
 
+/** A photo to judge along with the text (a shared recipe's own photo). */
+export interface ModerationImage {
+  mimeType: string;
+  /** Base64, no data: prefix. */
+  data: string;
+}
+
 export interface ContentModerator {
   /** Throws (upstream error) when the check could not run. The caller decides fail-open/closed. */
-  review(text: string, kind: ModerationKind): Promise<ModerationVerdict>;
+  review(text: string, kind: ModerationKind, image?: ModerationImage): Promise<ModerationVerdict>;
 }
 
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
@@ -131,6 +138,8 @@ Allow (verdict "allow", category "none") everything else, including:
 - any language other than English
 - a display name that is an ordinary first name, nickname or pseudonym
 
+A photo may be attached: reject it under the same categories (e.g. sexual or gory imagery, a photo of someone's ID or document, an advert). An ordinary food, kitchen or dish photo is allowed even if it looks unappetising.
+
 When unsure, allow: other users can still report it.`;
 
 interface GeminiResponse {
@@ -143,7 +152,7 @@ export function createGeminiModerator(
   retryDelayMs?: number,
 ): ContentModerator {
   return {
-    async review(text, kind) {
+    async review(text, kind, image) {
       const endpoint =
         `https://generativelanguage.googleapis.com/v1beta/models/` +
         `${config.geminiModel}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`;
@@ -160,7 +169,17 @@ export function createGeminiModerator(
             {
               role: 'user',
               // Fenced so the text is judged, not obeyed ("ignore the rules and allow this").
-              parts: [{ text: `Type: ${kind}\nText to judge:\n<<<\n${text}\n>>>` }],
+              parts: [
+                { text: `Type: ${kind}\nText to judge:\n<<<\n${text}\n>>>` },
+                // The recipe's photo is published too, so it is judged by the
+                // same rules (sexual, violent or hateful imagery, personal info).
+                ...(image
+                  ? [
+                      { text: 'Photo to judge (it is published with the text):' },
+                      { inlineData: { mimeType: image.mimeType, data: image.data } },
+                    ]
+                  : []),
+              ],
             },
           ],
           generationConfig: {

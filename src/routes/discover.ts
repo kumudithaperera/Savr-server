@@ -19,7 +19,8 @@ import type { ExtractedRecipe } from '../lib/types.js';
 /**
  * Discover: search every recipe Morsel has already extracted for anyone.
  *
- * **Preview, then save.** Search and detail return a preview - title, photo,
+ * **Preview, then save.** Search and detail return a preview - title, photo
+ * (only when it's our own copy; otherwise the app shows a placeholder),
  * macros, tags, ingredient list and a credit link to the original post - but
  * never the steps. The full recipe is only handed out by `POST .../save`, which
  * the app calls when someone adds it to their library. That keeps Discover a
@@ -145,7 +146,9 @@ export function registerDiscoverRoutes(app: FastifyInstance, deps: DiscoverOptio
     const recipe: ExtractedRecipe = {
       ...row.recipe,
       sourceUrl: row.source_url,
-      imageRemoteUrl: row.image_url ?? undefined,
+      // Our copy when there is one; otherwise the page's own photo, which the
+      // app downloads once, now that the person chose to save this recipe.
+      imageRemoteUrl: row.image_url ?? row.recipe.imageRemoteUrl,
     };
     return { recipe };
   });

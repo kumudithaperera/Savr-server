@@ -249,7 +249,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     communityDb,
     moderator: deps.moderator,
     rehoster,
-    photoSearch: deps.photoSearch,
     hashPepper: deps.communityHashPepper ?? '',
   });
   registerRevenueCatWebhook(app, {

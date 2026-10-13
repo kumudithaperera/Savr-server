@@ -222,7 +222,32 @@ const PUBLIC_QUERY_PARAMS = new Set(['p', 'page_id', 'recipe', 'recipe_id', 'id'
  * identify the sharer. Null = not publishable (unknown shape, or a web link
  * with a non-allowlisted query param).
  */
-export function publicSourceUrl(canonical: string, creator?: string | null): string | null {
+/**
+ * A web link as the site itself serves it - original host (`www.` and all) and
+ * path, minus tracking params and the fragment. The canonical key drops `www.`
+ * for cache identity, but some sites don't answer on the bare domain, so the
+ * published link has to keep it. Null when the query keeps a non-allowlisted
+ * param.
+ */
+function publicWebUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  for (const name of [...parsed.searchParams.keys()]) {
+    if (isTracking(name)) parsed.searchParams.delete(name);
+    else if (!PUBLIC_QUERY_PARAMS.has(name)) return null;
+  }
+  parsed.hash = '';
+  parsed.username = '';
+  parsed.password = '';
+  return parsed.toString();
+}
+
+export function publicSourceUrl(canonical: string, creator?: string | null, originalUrl?: string): string | null {
   if (canonical.startsWith('ig:')) {
     const code = canonical.slice(3);
     return /^[A-Za-z0-9_-]+$/.test(code) ? `https://www.instagram.com/p/${code}/` : null;
@@ -238,6 +263,8 @@ export function publicSourceUrl(canonical: string, creator?: string | null): str
     return `https://www.tiktok.com/@${user}/video/${id}`;
   }
   if (canonical.startsWith('web:')) {
+    // Prefer the link as the site served it, when it is the same page.
+    if (originalUrl && canonicalCacheKey(originalUrl, 'web') === canonical) return publicWebUrl(originalUrl);
     let parsed: URL;
     try {
       parsed = new URL(`https://${canonical.slice(4)}`);
@@ -260,12 +287,15 @@ export function publicSourceUrl(canonical: string, creator?: string | null): str
  */
 export function publicShareUrl(url: string, platform: SourcePlatform): string | null {
   const canonical = canonicalCacheKey(url, platform);
-  const direct = publicSourceUrl(canonical);
+  const direct = publicSourceUrl(canonical, null, url);
   if (direct) return direct;
   if (!canonical.startsWith('web:')) return null;
   try {
-    const parsed = new URL(`https://${canonical.slice(4)}`);
+    const parsed = new URL(url);
     parsed.search = '';
+    parsed.hash = '';
+    parsed.username = '';
+    parsed.password = '';
     return parsed.toString();
   } catch {
     return null;

@@ -7,6 +7,16 @@ import { createMemoryCommunityDb } from '../lib/community-db.js';
 import { upstreamError } from '../lib/errors.js';
 import { createMemoryRecipeFeedDb } from '../lib/recipe-feed-db.js';
 import type { ContentModerator } from '../services/moderation.js';
+import type { ImageRehoster } from '../services/rehost.js';
+
+/** Stands in for the Supabase bucket: uploads get a fake public URL. */
+const fakeRehoster = (): ImageRehoster => ({
+  rehost: vi.fn(async (url) => (url?.includes('cdninstagram.com') ? 'https://bucket.test/thumb.jpg' : null)),
+  storeUpload: vi.fn(async (image) => `https://bucket.test/${image.mimeType.split('/')[1]}-${image.bytes.length}`),
+});
+
+// The smallest valid JPEG signature is enough for the type sniff.
+const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46]).toString('base64');
 
 /**
  * The recipe feed's promises, pinned: posts show a moderated display name or a
@@ -34,6 +44,7 @@ const shared = (over: Record<string, unknown> = {}) => ({
 
 function setup(options: { moderator?: ContentModerator; configured?: boolean } = {}) {
   const db = createMemoryRecipeFeedDb();
+  const rehoster = fakeRehoster();
   const communityDb = createMemoryCommunityDb();
   const app = buildApp({
     instagramScraper: { scrape: vi.fn() },
@@ -48,6 +59,7 @@ function setup(options: { moderator?: ContentModerator; configured?: boolean } =
     recipeFeedDb: options.configured === false ? undefined : db,
     moderator: options.moderator,
     communityHashPepper: PEPPER,
+    rehoster,
     rateLimit: { max: 1000, windowMs: 60_000 },
   } as AppDeps);
 
@@ -65,10 +77,10 @@ function setup(options: { moderator?: ContentModerator; configured?: boolean } =
   async function share(deviceId: string, body: Record<string, unknown> = {}) {
     const res = await as(deviceId).post('/community/recipes', { recipe: shared(), ...body });
     expect(res.statusCode).toBe(201);
-    return res.json().post as { id: string; authorName: string };
+    return res.json().post as { id: string; authorName: string; imageUrl: string | null };
   }
 
-  return { app, db, communityDb, as, share };
+  return { app, db, communityDb, rehoster, as, share };
 }
 
 describe('community recipe feed', () => {
@@ -228,5 +240,44 @@ describe('community recipe feed', () => {
       expect((await as('alice').post('/community/recipes', { recipe: shared() })).statusCode).toBe(201);
     }
     expect((await as('alice').post('/community/recipes', { recipe: shared() })).statusCode).toBe(429);
+  });
+
+  describe('photos', () => {
+    it('never publishes an image URL the client chose', async () => {
+      const { share } = setup();
+      const post = await share('alice', { recipe: shared({ imageRemoteUrl: 'https://tracker.example/pixel.jpg' }) });
+      expect(post.imageUrl).toBeNull();
+    });
+
+    it('copies an Instagram thumbnail into the bucket', async () => {
+      const { share } = setup();
+      const post = await share('alice', { recipe: shared({ imageRemoteUrl: 'https://scontent.cdninstagram.com/v/t.jpg' }) });
+      expect(post.imageUrl).toBe('https://bucket.test/thumb.jpg');
+    });
+
+    it('stores an uploaded photo and has the moderator judge it', async () => {
+      const review = vi.fn(async () => ({ allowed: true as const }));
+      const { share } = setup({ moderator: { review } });
+      const post = await share('alice', { image: { mimeType: 'image/png', data: JPEG_B64 } });
+      // The bytes decide the type, not the claimed mimeType.
+      expect(post.imageUrl).toBe('https://bucket.test/jpeg-8');
+      expect(review).toHaveBeenCalledWith(expect.any(String), 'recipe', { mimeType: 'image/jpeg', data: JPEG_B64 });
+    });
+
+    it('refuses an upload that is not an image', async () => {
+      const { as } = setup();
+      const res = await as('alice').post('/community/recipes', {
+        recipe: shared(),
+        image: { mimeType: 'image/jpeg', data: Buffer.from('<svg onload=alert(1)>').toString('base64') },
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('keeps the published photo when a re-share sends none', async () => {
+      const { as, share } = setup();
+      const post = await share('alice', { image: { mimeType: 'image/jpeg', data: JPEG_B64 } });
+      const updated = await as('alice').put(`/community/recipes/${post.id}`, { recipe: shared({ title: 'Dal v2' }) });
+      expect(updated.json().post.imageUrl).toBe('https://bucket.test/jpeg-8');
+    });
   });
 });
