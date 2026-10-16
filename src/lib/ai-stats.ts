@@ -11,7 +11,7 @@ import type { Store } from './store.js';
  * Calls = requests actually sent to a model. Saves = a request that would have
  * been sent before the caches existed.
  */
-export const AI_CALLS = ['geminiText', 'geminiVideo', 'deepseek', 'moderate', 'improve'] as const;
+export const AI_CALLS = ['geminiText', 'geminiVideo', 'deepseek', 'moderate', 'improve', 'foodProfile'] as const;
 export const AI_SAVES = [
   'jsonLdParse',
   'extractNegativeHit',
@@ -22,6 +22,7 @@ export const AI_SAVES = [
   'moderateCacheHit',
   'moderateBodySkipped',
   'improveCacheHit',
+  'foodProfileCacheHit',
 ] as const;
 export type AiStat = (typeof AI_CALLS)[number] | (typeof AI_SAVES)[number];
 

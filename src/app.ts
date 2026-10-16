@@ -5,6 +5,7 @@ import type { DeepSeekRecipeParser } from './services/deepseek.js';
 import type { RecipeParser } from './services/gemini.js';
 import type { VideoRecipeParser } from './services/gemini-video.js';
 import type { PhotoSearch } from './services/images.js';
+import type { FoodProfiler } from './services/food-profiles.js';
 import type { RecipeImprover } from './services/improve.js';
 import type { NutritionLookup } from './services/nutrition.js';
 import type { ContentModerator } from './services/moderation.js';
@@ -24,11 +25,13 @@ import { readAiStats } from './lib/ai-stats.js';
 import { withModerationCache } from './services/moderation.js';
 import { registerCommunityRoutes } from './routes/community.js';
 import { registerDiscoverRoutes } from './routes/discover.js';
+import { registerGroceryRoutes } from './routes/grocery.js';
 import { registerRecipeFeedRoutes } from './routes/recipe-feed.js';
 import { registerExtractRoute, statsKey, fallbackStatsKey, deepseekStatsKey, type ExtractLimits } from './routes/extract.js';
 import { registerImageSearchRoute } from './routes/images.js';
 import { registerImproveRoute } from './routes/improve.js';
 import { registerNutritionRoute } from './routes/nutrition.js';
+import { registerPlannerRoutes } from './routes/planner.js';
 import { registerRedeemRoute, type RedeemOptions } from './routes/redeem.js';
 import { registerRevenueCatWebhook } from './routes/webhooks.js';
 
@@ -99,6 +102,8 @@ export interface AppDeps {
   communityDb?: CommunityDb;
   /** AI pre-check for board posts/comments. Omitted = local checks only. */
   moderator?: ContentModerator;
+  /** Backs `/grocery/profiles`. Omitted = the app keeps its built-in food weights. */
+  foodProfiler?: FoodProfiler;
   /** Server-only pepper for board author hashes. See `routes/community.ts`. */
   communityHashPepper?: string;
   /** Discover's search index. Omitted = unconfigured (503, and nothing is indexed). */
@@ -255,6 +260,14 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     rehoster,
     hashPepper: deps.communityHashPepper ?? '',
   });
+  registerPlannerRoutes(app, {
+    discoverDb,
+    recipeFeedDb,
+    communityDb,
+    store,
+    hashPepper: deps.communityHashPepper ?? '',
+  });
+  registerGroceryRoutes(app, { store, foodProfiler: deps.foodProfiler });
   registerRevenueCatWebhook(app, {
     supabase,
     webhookSecret: deps.revenueCatWebhookSecret ?? '',

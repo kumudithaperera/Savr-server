@@ -19,8 +19,8 @@ values
   ('00000000-0000-4000-8000-000000000009', 'morsel-team', 'Import from the share sheet', 'Share a link to Morsel from any app, or paste one straight into the Add tab.', 'shipped', now() - interval '8 minutes', now() - interval '8 minutes'),
   ('00000000-0000-4000-8000-000000000010', 'morsel-team', 'Recipe extraction from links', 'Paste an Instagram, TikTok, or blog link and get a clean, structured recipe.', 'shipped', now() - interval '9 minutes', now() - interval '9 minutes'),
   ('00000000-0000-4000-8000-000000000011', 'morsel-team', 'Morsel Plus', 'A premium plan that unlocks the tracking, AI and nutrition features. Live on Android; the iPhone checkout is still being set up.', 'in_progress', null, now() - interval '10 minutes'),
-  ('00000000-0000-4000-8000-000000000012', 'morsel-team', 'Adjust to Taste', 'Tell the AI to dial any ingredient up or down - sugar, salt, gluten, dairy, spice, and more - and it rebalances the rest of the recipe to match.', 'in_progress', null, now() - interval '11 minutes'),
-  ('00000000-0000-4000-8000-000000000013', 'morsel-team', 'AI meal planner', 'Plan meals around your daily calorie intake.', 'planned', null, now() - interval '12 minutes'),
+  ('00000000-0000-4000-8000-000000000012', 'morsel-team', 'Adjust to Taste', 'Tell the AI to dial any ingredient up or down - sugar, salt, gluten, dairy, spice, and more - and it rebalances the rest of the recipe to match.', 'shipped', now() - interval '11 minutes', now() - interval '11 minutes'),
+  ('00000000-0000-4000-8000-000000000013', 'morsel-team', 'Smart Planner', 'Plan your week around your calories.', 'shipped', now() - interval '12 minutes', now() - interval '12 minutes'),
   ('00000000-0000-4000-8000-000000000014', 'morsel-team', 'Grocery lists', 'Auto-build shopping lists from your recipes and meal plan.', 'planned', null, now() - interval '13 minutes'),
   ('00000000-0000-4000-8000-000000000015', 'morsel-team', 'Sync across devices', 'Back up and access your recipes everywhere.', 'planned', null, now() - interval '14 minutes')
 on conflict (id) do nothing;

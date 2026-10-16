@@ -62,6 +62,9 @@ export type IndexListRow = Omit<
   'recipe' | 'ingredients' | 'search_text' | 'classified_at' | 'report_count' | 'hidden' | 'updated_at'
 >;
 
+/** A list row plus its ingredient lines, for the Smart Planner. Still never the steps. */
+export type IndexPlannerRow = IndexListRow & { ingredients: string[] };
+
 export interface DiscoverDb {
   readonly configured: boolean;
   /**
@@ -70,6 +73,8 @@ export interface DiscoverDb {
    */
   upsert(row: IndexUpsert): Promise<void>;
   search(query: DiscoverQuery): Promise<IndexListRow[]>;
+  /** Like `search`, most-saved first, with ingredients (the planner scores overlap on them). */
+  plannerSearch(filters: RecipeFilters, limit: number): Promise<IndexPlannerRow[]>;
   /** Visible or not - the route decides. */
   getById(id: string): Promise<IndexRow | null>;
   getByKey(canonicalKey: string): Promise<IndexRow | null>;
@@ -130,6 +135,14 @@ export function createSupabaseDiscoverDb(config: PostgrestConfig, deps: { fetch?
       return db.request<IndexListRow[]>(
         `recipe_index?select=${LIST_COLUMNS}&${params.join('&')}&order=${order}` +
           `&offset=${query.offset}&limit=${query.limit}`,
+      );
+    },
+
+    async plannerSearch(filters, limit) {
+      const params = ['hidden=is.false', ...filterParams(filters)];
+      return db.request<IndexPlannerRow[]>(
+        `recipe_index?select=${LIST_COLUMNS},ingredients&${params.join('&')}` +
+          `&order=save_count.desc,created_at.desc&limit=${limit}`,
       );
     },
 
@@ -215,6 +228,18 @@ export function createMemoryDiscoverDb(): DiscoverDb & {
       });
     },
 
+    async plannerSearch(filters, limit) {
+      return [...rows.values()]
+        .filter((row) => !row.hidden && matchesFilters(row, filters))
+        .sort((a, b) => b.save_count - a.save_count || b.created_at.localeCompare(a.created_at))
+        .slice(0, limit)
+        .map((row) => {
+          const { recipe: _r, search_text: _s, classified_at: _c, report_count: _rc, hidden: _h, updated_at: _u, ...list } =
+            copy(row);
+          return list;
+        });
+    },
+
     async getById(id) {
       const row = byId(id);
       return row ? copy(row) : null;
@@ -282,6 +307,7 @@ export function createUnconfiguredDiscoverDb(): DiscoverDb {
     configured: false,
     upsert: refuse,
     search: refuse,
+    plannerSearch: refuse,
     getById: refuse,
     getByKey: refuse,
     setFacets: refuse,

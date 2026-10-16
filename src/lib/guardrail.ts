@@ -45,7 +45,7 @@ const PROTECTED_PATHS = new Set([
  * (`/community/posts/<uuid>/vote`, `/discover/items/<uuid>/save`), so they
  * can't be listed path by path.
  */
-const PROTECTED_PREFIXES = ['/community/', '/discover/'];
+const PROTECTED_PREFIXES = ['/community/', '/discover/', '/grocery/'];
 
 function isProtected(path: string): boolean {
   return PROTECTED_PATHS.has(path) || PROTECTED_PREFIXES.some((prefix) => path.startsWith(prefix));

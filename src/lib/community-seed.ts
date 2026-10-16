@@ -100,16 +100,17 @@ export const SEED_POSTS: SeedPost[] = [
     id: id(12),
     title: 'Adjust to Taste',
     body: 'Tell the AI to dial any ingredient up or down - sugar, salt, gluten, dairy, spice, and more - and it rebalances the rest of the recipe to match.',
-    status: 'in_progress',
+    status: 'shipped',
+  },
+
+  {
+    id: id(13),
+    title: 'Smart Planner',
+    body: 'Plan your week around your calories.',
+    status: 'shipped',
   },
 
   // --- Planned ---
-  {
-    id: id(13),
-    title: 'AI meal planner',
-    body: 'Plan meals around your daily calorie intake.',
-    status: 'planned',
-  },
   {
     id: id(14),
     title: 'Grocery lists',

@@ -12,6 +12,7 @@ import { createDeepSeekRecipeParser } from './services/deepseek.js';
 import { createGeminiRecipeParser } from './services/gemini.js';
 import { createGeminiVideoParser } from './services/gemini-video.js';
 import { createPexelsPhotoSearch } from './services/images.js';
+import { createGeminiFoodProfiler } from './services/food-profiles.js';
 import { createGeminiRecipeImprover } from './services/improve.js';
 import { createGeminiModerator } from './services/moderation.js';
 import { createBrandFirstNutritionLookup, createUsdaNutritionLookup, createDeepSeekNutritionLookup } from './services/nutrition.js';
@@ -61,6 +62,7 @@ const app = buildApp({
           serviceRoleKey: config.supabaseServiceRoleKey,
         }),
   moderator: createGeminiModerator({ geminiApiKey: config.geminiApiKey, geminiModel: config.geminiLightModel }),
+  foodProfiler: createGeminiFoodProfiler(config),
   communityHashPepper: config.communityHashPepper,
   discoverDb: discoverInMemory ? createMemoryDiscoverDb() : createSupabaseDiscoverDb(serviceRole),
   recipeFeedDb: discoverInMemory ? createMemoryRecipeFeedDb() : createSupabaseRecipeFeedDb(serviceRole),

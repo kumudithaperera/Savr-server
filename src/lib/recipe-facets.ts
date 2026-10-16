@@ -43,6 +43,16 @@ export interface RecipeFilters {
   diet: DietTag[];
   maxCalories: number | null;
   maxMinutes: number | null;
+  /** Smart Planner only (not a query param): per-serving floor. */
+  minCalories?: number | null;
+  /** Smart Planner only: any of these categories. */
+  categories?: Category[];
+  /**
+   * Smart Planner only: rows whose title or ingredients contain any of these
+   * are left out. Already reduced to letters, digits and spaces by the caller
+   * (see `plannerTerms`), so they can't reach PostgREST's filter grammar.
+   */
+  excluded?: string[];
 }
 
 function positiveInt(raw: string | undefined, max: number): number | null {
@@ -61,6 +71,22 @@ export function searchTerms(raw: string | undefined): string[] {
   return (raw.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
     .map((word) => word.slice(0, 32))
     .slice(0, 6);
+}
+
+/**
+ * Excluded-ingredient terms for the planner: lower-cased letters, digits and
+ * single spaces, at most 30 terms of at most 40 characters. Like `searchTerms`,
+ * nothing the caller sends survives that could reach PostgREST's grammar.
+ */
+export function plannerTerms(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const terms = new Set<string>();
+  for (const value of raw) {
+    if (typeof value !== 'string') continue;
+    const clean = (value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).join(' ').slice(0, 40).trim();
+    if (clean) terms.add(clean);
+  }
+  return [...terms].slice(0, 30);
 }
 
 /** Parses the shared filter query params. Unknown values are ignored, not errors. */
@@ -91,6 +117,13 @@ export function filterParams(filters: RecipeFilters): string[] {
   if (filters.diet.length > 0) params.push(`diet_tags=cs.{${filters.diet.join(',')}}`);
   if (filters.maxCalories !== null) params.push(`calories=lte.${filters.maxCalories}`);
   if (filters.maxMinutes !== null) params.push(`total_minutes=lte.${filters.maxMinutes}`);
+  if (filters.minCalories != null) params.push(`calories=gte.${filters.minCalories}`);
+  if (filters.categories && filters.categories.length > 0) {
+    params.push(`category=in.(${filters.categories.join(',')})`);
+  }
+  for (const term of filters.excluded ?? []) {
+    params.push(`search_text=not.ilike.${encodeURIComponent(`*${term}*`)}`);
+  }
   return params;
 }
 
@@ -106,6 +139,11 @@ export function matchesFilters(row: FacetColumns, filters: RecipeFilters): boole
   if (filters.maxMinutes !== null && (row.total_minutes === null || row.total_minutes > filters.maxMinutes)) {
     return false;
   }
+  if (filters.minCalories != null && row.calories < filters.minCalories) return false;
+  if (filters.categories && filters.categories.length > 0 && !filters.categories.includes(row.category)) {
+    return false;
+  }
+  if ((filters.excluded ?? []).some((term) => row.search_text.includes(term))) return false;
   return true;
 }
 

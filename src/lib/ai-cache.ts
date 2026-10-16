@@ -43,3 +43,5 @@ export const improveCacheKey = (mode: string, payload: unknown) =>
   `improve:v1:${mode}:${sha256(JSON.stringify(payload))}`;
 
 export const negativeExtractKey = (canonical: string) => `neg:extract:v1:${sha256(canonical)}`;
+
+export const foodProfileCacheKey = (key: string) => `food:v1:${sha256(key)}`;
