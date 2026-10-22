@@ -8,9 +8,13 @@
  * account and no network.
  *
  * Every method **fails open**: a store outage logs a warning and behaves like a
- * cache miss / zero count rather than blocking extraction. The backstop against
- * runaway spend is the vendor-side spend cap (Apify account limit, Gemini quota),
- * which cannot fail open. See `server/README.md`.
+ * cache miss rather than blocking extraction. Counters and claims are the
+ * exception - they fall back to a process-local map instead of returning "no
+ * usage", so an Upstash outage degrades the per-IP rate limit, the quotas and
+ * the global AI ceiling to per-instance counting rather than switching all of
+ * them off at once. The backstop against runaway spend is still the
+ * vendor-side spend cap (Apify account limit, Gemini quota), which cannot fail
+ * open. See `server/README.md`.
  */
 
 export interface Store {
@@ -23,8 +27,9 @@ export interface Store {
   readonly kind: 'upstash' | 'memory';
   /**
    * Atomically increments `key` and returns the new count, setting `ttlSeconds`
-   * on first write so the window/period expires on its own. Returns 0 if the
-   * store is unreachable (fail-open: the caller treats it as "no usage yet").
+   * on first write so the window/period expires on its own. If the store is
+   * unreachable the count comes from a process-local fallback, so limits keep
+   * holding per instance through an outage.
    */
   incrWithTtl(key: string, ttlSeconds: number): Promise<number>;
   /** Reads and parses a JSON value, or null when missing/unreadable. */
@@ -41,11 +46,11 @@ export interface Store {
    * the same code in the same instant cannot both succeed, which a
    * read-then-write cannot guarantee.
    *
-   * Fails **open** like everything else here - an unreachable store returns
-   * `true` (treat the key as freshly claimed) rather than locking the caller
-   * out. For redeem codes that means an Upstash outage can let one code be
-   * claimed twice; the alternative is refusing every legitimate redemption
-   * during an outage. See `server/README.md`.
+   * Fails **open** like everything else here, but onto the process-local
+   * fallback rather than a blanket `true`: during an outage a code can still be
+   * claimed once per instance, instead of any number of times. The alternative
+   * is refusing every legitimate redemption during an outage. See
+   * `server/README.md`.
    */
   setJsonIfAbsent(key: string, value: unknown, ttlSeconds?: number): Promise<boolean>;
 }
@@ -140,6 +145,8 @@ interface UpstashResult {
 }
 
 function createUpstashStore(config: StoreConfig, warn: Warn): Store {
+  /** Where counters and claims land while Upstash is unreachable. */
+  const fallback = createMemoryStore();
   const endpoint = config.upstashUrl.replace(/\/$/, '');
   const headers = {
     authorization: `Bearer ${config.upstashToken}`,
@@ -180,8 +187,8 @@ function createUpstashStore(config: StoreConfig, warn: Warn): Store {
         }
         return Number.isFinite(count) ? count : 0;
       } catch (err) {
-        warn(`[store] INCR ${key} failed, allowing the request: ${(err as Error).message}`);
-        return 0;
+        warn(`[store] INCR ${key} failed, counting in-process: ${(err as Error).message}`);
+        return fallback.incrWithTtl(key, ttlSeconds);
       }
     },
     async getJson<T>(key: string) {
@@ -213,8 +220,8 @@ function createUpstashStore(config: StoreConfig, warn: Warn): Store {
         // already existed.
         return set?.result != null;
       } catch (err) {
-        warn(`[store] SET NX ${key} failed, treating the key as unclaimed: ${(err as Error).message}`);
-        return true;
+        warn(`[store] SET NX ${key} failed, claiming in-process: ${(err as Error).message}`);
+        return fallback.setJsonIfAbsent(key, value, ttlSeconds);
       }
     },
   };

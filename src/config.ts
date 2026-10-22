@@ -230,9 +230,9 @@ export interface Config {
   communityImageBucket: string;
   /**
    * Gemini model for the small, frequent call: community moderation (which
-   * also tags a shared recipe on the side). Defaults to `geminiModel`. Point
-   * it at a lighter model: free-tier quotas are per model, so posting then
-   * never eats the extraction allowance.
+   * also tags a shared recipe on the side). Defaults to `gemini-2.5-flash-lite`,
+   * never to `geminiModel`: free-tier quotas are per model, so falling back to
+   * the extraction model would let posting eat the extraction allowance.
    */
   geminiLightModel: string;
 }
@@ -327,6 +327,6 @@ export function loadConfig(): Config {
     communityDb: process.env.COMMUNITY_DB === 'memory' ? 'memory' : 'supabase',
     discoverDb: process.env.DISCOVER_DB === 'memory' ? 'memory' : 'supabase',
     communityImageBucket: process.env.COMMUNITY_IMAGE_BUCKET ?? 'community-images',
-    geminiLightModel: process.env.GEMINI_LIGHT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    geminiLightModel: process.env.GEMINI_LIGHT_MODEL || 'gemini-2.5-flash-lite',
   };
 }

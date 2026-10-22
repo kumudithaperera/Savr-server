@@ -1,5 +1,6 @@
 import { unprocessable, upstreamError } from '../lib/errors.js';
 import { parseIsoDuration } from '../lib/facet-rules.js';
+import { assertPublicUrl, dnsResolver, type HostResolver } from '../lib/public-url.js';
 import type { Category, ParsedRecipe, ScrapedPost } from '../lib/types.js';
 
 export interface WebScraper {
@@ -9,6 +10,12 @@ export interface WebScraper {
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+/** Redirect hops followed by hand, so each hop's host is re-checked. */
+const MAX_REDIRECTS = 5;
+/** Recipe pages are well under this; anything bigger is not worth reading. */
+const MAX_PAGE_BYTES = 3 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 15_000;
 
 /** Recursively finds the first schema.org Recipe node in parsed JSON-LD. */
 function findRecipeNode(node: unknown): Record<string, unknown> | null {
@@ -259,24 +266,76 @@ function htmlToText(html: string): string {
 }
 
 /**
+ * Reads at most `limit` bytes of a body as UTF-8. A page that declares or
+ * streams more is cut off rather than buffered whole into memory.
+ */
+async function readCapped(response: Response, limit: number): Promise<string> {
+  const declared = Number(response.headers?.get('content-length') ?? '0');
+  if (declared > limit) throw upstreamError('That page is too large to read.');
+  if (!response.body) return (await response.text()).slice(0, limit);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = 0;
+  let html = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    html += decoder.decode(value, { stream: true });
+    if (received >= limit) {
+      await reader.cancel().catch(() => {});
+      break;
+    }
+  }
+  return html + decoder.decode();
+}
+
+/**
+ * Fetches a user-supplied page with the SSRF guard applied to the first URL and
+ * every redirect target (`redirect: 'manual'`), a timeout, and a size cap.
+ */
+async function fetchPage(url: string, fetchImpl: typeof fetch, resolve: HostResolver): Promise<string> {
+  let target = await assertPublicUrl(url, resolve);
+  for (let hop = 0; ; hop++) {
+    let response: Response;
+    try {
+      response = await fetchImpl(target, {
+        headers: { 'user-agent': USER_AGENT },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw upstreamError(`Could not fetch the page: ${(err as Error).message}`);
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers?.get('location');
+      if (!location) throw upstreamError(`The page returned HTTP ${response.status}.`);
+      if (hop >= MAX_REDIRECTS) throw upstreamError('The page redirected too many times.');
+      target = await assertPublicUrl(new URL(location, target), resolve);
+      continue;
+    }
+    if (!response.ok) {
+      throw upstreamError(`The page returned HTTP ${response.status}.`);
+    }
+    return readCapped(response, MAX_PAGE_BYTES);
+  }
+}
+
+/**
  * Creates a web/blog recipe scraper. Prefers schema.org/Recipe JSON-LD; falls
  * back to the page title, description, and visible text. The result is fed to
- * the same Gemini parser used for captions. `fetchImpl` is injectable.
+ * the same Gemini parser used for captions. `fetchImpl` and `resolve` (the DNS
+ * lookup behind the SSRF guard) are injectable.
  */
-export function createWebScraper(fetchImpl: typeof fetch = fetch): WebScraper {
+export function createWebScraper(
+  fetchImpl: typeof fetch = fetch,
+  resolve: HostResolver = dnsResolver,
+): WebScraper {
   return {
     async scrape(url: string): Promise<ScrapedPost> {
-      let response: Response;
-      try {
-        response = await fetchImpl(url, { headers: { 'user-agent': USER_AGENT } });
-      } catch (err) {
-        throw upstreamError(`Could not fetch the page: ${(err as Error).message}`);
-      }
-      if (!response.ok) {
-        throw upstreamError(`The page returned HTTP ${response.status}.`);
-      }
-
-      const html = await response.text();
+      const html = await fetchPage(url, fetchImpl, resolve);
       const recipe = extractJsonLdRecipe(html);
 
       if (recipe) {

@@ -172,9 +172,11 @@ instead. All of them are configured through env vars (see `.env.example`). `/red
 fifth of its own: 5 failed code attempts per hour, per install and per IP.
 
 > **`APP_SHARED_SECRET` must actually be set.** The shared-secret layer is skipped
-> entirely when it is empty, and the app only sends the header when its own
-> `EXPO_PUBLIC_APP_KEY` is non-empty. If either side is unset the routes are open to
-> anyone; a production build shipped in exactly that state once, so check both.
+> entirely when it is empty, so with `NODE_ENV=production` (the Dockerfile sets it) the
+> server refuses to start without one. The app only sends the header when its own
+> `EXPO_PUBLIC_APP_KEY` is non-empty - the app's release preflight fails a build that
+> lacks it. A production build once shipped with the routes open, so both sides are now
+> checked.
 
 | Layer | Scope | Response when tripped |
 | --- | --- | --- |
@@ -236,7 +238,9 @@ with `npm run integrity:check -- <key.json>`, and confirm with `"playIntegrity":
 Counters live in Upstash Redis so they survive the cold starts and redeploys of
 a free Render instance. **Every store call fails open**: if Upstash is
 unreachable the request is allowed and a warning is logged, because an outage
-there must not take extraction down. The backstop that cannot fail open is a
+there must not take extraction down. Counters and redeem claims fall back to an
+in-process map rather than reading as zero, so the per-IP rate limit, quotas and
+daily ceiling keep holding per instance during an outage. The backstop that cannot fail open is a
 vendor-side spend cap, so set both:
 
 - Apify: a maximum monthly spend limit on the account.

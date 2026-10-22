@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { NutritionLookup } from '../services/nutrition.js';
-import { badRequest } from '../lib/errors.js';
+import { requireQuery } from '../lib/query.js';
 
 interface NutritionDeps {
   nutrition: NutritionLookup;
@@ -10,9 +10,6 @@ interface NutritionDeps {
 interface NutritionBody {
   query?: unknown;
 }
-
-/** Longest ingredient line we'll forward. Real ones are a few words. */
-const MAX_QUERY_LENGTH = 200;
 
 /**
  * Registers `POST /nutrition`. Body: `{ query }`. Returns `{ macros, micros }` -
@@ -35,14 +32,7 @@ const MAX_QUERY_LENGTH = 200;
  */
 export function registerNutritionRoute(app: FastifyInstance, deps: NutritionDeps): void {
   app.post<{ Body: NutritionBody }>('/nutrition', async (request) => {
-    const raw = request.body?.query;
-    const query = typeof raw === 'string' ? raw.trim() : '';
-    if (!query) {
-      throw badRequest('A query is required.');
-    }
-    if (query.length > MAX_QUERY_LENGTH) {
-      throw badRequest('That query is too long.');
-    }
+    const query = requireQuery(request.body?.query);
 
     const nutrition = await deps.nutrition.search(query);
     return nutrition ?? { macros: null, micros: null };
