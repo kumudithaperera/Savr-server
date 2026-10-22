@@ -180,6 +180,7 @@ fifth of its own: 5 failed code attempts per hour, per install and per IP.
 | --- | --- | --- |
 | Shared secret (`x-morsel-app-key`) | Every call to a protected route | `401 unauthorized` |
 | Per-IP rate limit | 30 requests/minute per IP | `429 rate_limited` |
+| Play Integrity (`x-morsel-integrity-token`) | `/extract` and `/improve`, when `PLAY_INTEGRITY_KEY_FILE` is set | `403 integrity_failed` |
 | Per-install monthly quota | 30 AI extractions per install (the free cap) | `429 quota_exceeded` |
 | Global daily circuit breaker | 50 AI extractions service-wide | `503 at_capacity` |
 
@@ -210,9 +211,27 @@ Two things shape how these behave:
 The per-install quota is keyed on the `x-morsel-device-id` header, a hash of
 `ANDROID_ID` that survives uninstall/reinstall (see `Morsel/lib/device/id.ts`).
 It is client-supplied and therefore forgeable: it meters honest users and closes
-the reinstall bypass, but Play Integrity attestation is what would stop a
-scripted caller. Likewise the shared secret is inlined into the app bundle and
-extractable from the APK.
+the reinstall bypass, but on its own it can't stop a scripted caller. Likewise the
+shared secret is inlined into the app bundle and extractable from the APK.
+
+**Play Integrity** (`lib/integrity.ts`, MORSE-41) is the layer a script can't fake.
+On Android the app asks Google for a token per AI call, bound to the route and the
+device id, and the server has Google decode it with the dedicated
+`morsel-integrity` service account. The policy:
+
+- An explicit "not genuine" - a forged token, a sideloaded or repackaged build, a
+  token minted for another device id, or one older than 5 minutes - is refused (`403`).
+- No token (iOS, older builds), or a device Google can't judge (no Play
+  Services, custom ROMs, GrapheneOS), is allowed through to the quotas.
+- If Google can't be reached, the request fails open, like the store.
+
+So today it blocks forged and replayed tokens, but a caller can still skip the
+check by sending no token. Requiring a token means first closing the iOS gap
+(App Attest). To set it up on Render, add the key as a Secret File named
+`play-integrity-service-account.json` and set
+`PLAY_INTEGRITY_KEY_FILE=/etc/secrets/play-integrity-service-account.json`. Check a key
+with `npm run integrity:check -- <key.json>`, and confirm with `"playIntegrity": true` on
+`/health`. Never use the EAS submit key here: that one can publish releases.
 
 Counters live in Upstash Redis so they survive the cold starts and redeploys of
 a free Render instance. **Every store call fails open**: if Upstash is
@@ -282,3 +301,4 @@ GLOBAL_DAILY_EXTRACTION_LIMIT = monthly_budget / cost_per_extraction / 30
 - `npm run build` / `npm start` — compile to `dist/` and run
 - `npm test` — unit tests (vitest)
 - `npm run typecheck` — type-check only
+- `npm run integrity:check -- <key.json>` — checks a Play Integrity service-account key

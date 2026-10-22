@@ -5,6 +5,7 @@ import { createMemoryDiscoverDb, createSupabaseDiscoverDb } from './lib/discover
 import { createMemoryRecipeFeedDb, createSupabaseRecipeFeedDb } from './lib/recipe-feed-db.js';
 import { createPassthroughRehoster, createSupabaseImageRehoster } from './services/rehost.js';
 import { SEED_POSTS } from './lib/community-seed.js';
+import { createIntegrityChecker, createPlayIntegrityClient, loadServiceAccountKey } from './lib/integrity.js';
 import { createStore } from './lib/store.js';
 import { createSupabase } from './lib/supabase.js';
 import { createApifyInstagramScraper } from './services/apify.js';
@@ -23,6 +24,16 @@ import { createWebScraper } from './services/web.js';
 const config = loadConfig();
 
 const store = createStore({ upstashUrl: config.upstashUrl, upstashToken: config.upstashToken });
+
+// Throws on a configured-but-unreadable key, so a bad Secret File path fails the
+// deploy instead of silently leaving attestation off.
+const integrityKey = loadServiceAccountKey(config.playIntegrityKeyFile);
+const integrity = integrityKey
+  ? createIntegrityChecker({
+      client: createPlayIntegrityClient({ key: integrityKey, packageName: config.androidPackageName }),
+      packageName: config.androidPackageName,
+    })
+  : undefined;
 
 const serviceRole = { url: config.supabaseUrl, serviceRoleKey: config.supabaseServiceRoleKey };
 const discoverInMemory = config.discoverDb === 'memory';
@@ -43,6 +54,7 @@ const app = buildApp({
     deepseek: config.deepseekApiKey ? createDeepSeekNutritionLookup(config) : undefined,
   }),
   appSharedSecret: config.appSharedSecret,
+  integrity,
   store,
   supabase: createSupabase(
     {

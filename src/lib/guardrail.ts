@@ -2,6 +2,8 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { REVENUECAT_WEBHOOK_PATH } from '../routes/webhooks.js';
+import { deviceIdOf } from './grants.js';
+import { INTEGRITY_TOKEN_HEADER, type IntegrityChecker } from './integrity.js';
 import type { Store } from './store.js';
 
 /**
@@ -12,11 +14,13 @@ import type { Store } from './store.js';
  *
  *  1. Shared-secret header — the app sends `x-morsel-app-key`; requests without
  *     the matching value are rejected 401. (Baked into the app bundle, so not a
- *     true secret, but it stops trivial `curl` abuse. Play Integrity attestation
- *     is the real fix — see the extraction-limits roadmap.)
+ *     true secret, but it stops trivial `curl` abuse.)
  *  2. Per-IP rate limit — a fixed window held in the shared store, so it
  *     survives the cold starts and redeploys of a free Render instance and stays
  *     correct if we ever run more than one instance.
+ *  3. Play Integrity attestation on the AI routes, when configured - the check a
+ *     script can't fake. Runs last so a flood is cut off by the rate limit
+ *     before it spends the daily Google quota. Policy in `integrity.ts`.
  *
  * This runs as an `onRequest` hook, which fires *before* body parsing, so it can
  * only do URL-independent checks. The per-device monthly quota and the global
@@ -70,6 +74,13 @@ const RATE_LIMITED_ONLY_PATHS = new Map<string, number>([[REVENUECAT_WEBHOOK_PAT
 const APP_KEY_HEADER = 'x-morsel-app-key';
 
 /**
+ * Routes that also check a Play Integrity token: the two that spend AI calls.
+ * The app requests one token per call to these, so the free 10k/day Google
+ * quota is spent where the money is, not on every board vote.
+ */
+const INTEGRITY_PATHS = new Set(['/extract', '/improve']);
+
+/**
  * Constant-time secret comparison. `!==` leaks the length of the matching prefix
  * through response timing, which is enough to recover a secret byte by byte given
  * enough samples. Length is compared first (and unavoidably leaks) because
@@ -93,12 +104,14 @@ export const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 60_000 
 
 /**
  * Builds an `onRequest` hook enforcing the shared secret + per-IP rate limit on
- * the protected paths. Other routes (e.g. `/health`) pass through untouched.
+ * the protected paths, plus attestation on `INTEGRITY_PATHS` when `integrity`
+ * is given. Other routes (e.g. `/health`) pass through untouched.
  */
 export function createRequestGuard(
   appSharedSecret: string,
   store: Store,
   rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT,
+  integrity?: IntegrityChecker,
 ) {
   const windowSeconds = Math.ceil(rateLimit.windowMs / 1000);
 
@@ -126,6 +139,23 @@ export function createRequestGuard(
       await reply
         .status(429)
         .send({ code: 'rate_limited', message: 'Too many requests. Please try again shortly.' });
+      return;
+    }
+
+    if (integrity && INTEGRITY_PATHS.has(path)) {
+      const raw = request.headers[INTEGRITY_TOKEN_HEADER];
+      const token = typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+      const outcome = await integrity.check(token, path, deviceIdOf(request));
+      if (outcome.kind === 'rejected') {
+        request.log.warn({ path, reason: outcome.reason }, 'integrity check rejected request');
+        await reply
+          .status(403)
+          .send({ code: 'integrity_failed', message: 'This copy of Morsel could not be verified.' });
+        return;
+      }
+      if (outcome.kind === 'error') {
+        request.log.warn({ path, reason: outcome.reason }, 'integrity check unavailable; failing open');
+      }
     }
   };
 }
