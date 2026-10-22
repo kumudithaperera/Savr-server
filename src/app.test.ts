@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from './app.js';
 import { unprocessable, upstreamError } from './lib/errors.js';
+import type { IntegrityOutcome } from './lib/integrity.js';
 import type { ScrapedPost } from './lib/types.js';
 
 /**
@@ -122,6 +123,77 @@ describe('guardrail', () => {
     const open = buildApp(makeDeps({ appSharedSecret: '' }));
     expect((await open.inject({ method: 'GET', url: '/health' })).json().appKey).toBe(false);
     await open.close();
+  });
+});
+
+describe('guardrail: Play Integrity', () => {
+  /** A checker that answers `outcome` and records what it was asked. */
+  function fakeIntegrity(outcome: IntegrityOutcome) {
+    return { check: vi.fn(async () => outcome) };
+  }
+
+  const extract = (app: ReturnType<typeof buildApp>, headers: Record<string, string> = {}) =>
+    app.inject({
+      method: 'POST',
+      url: '/extract',
+      headers: { 'x-morsel-device-id': 'device-1', ...headers },
+      payload: { url: 'https://www.tiktok.com/@x/video/1' },
+    });
+
+  it('refuses /extract with 403 on an explicit not-genuine verdict', async () => {
+    const deps = makeDeps({ integrity: fakeIntegrity({ kind: 'rejected', reason: 'sideloaded' }) });
+    const app = buildApp(deps);
+    const res = await extract(app, { 'x-morsel-integrity-token': 'tok' });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().code).toBe('integrity_failed');
+    expect(deps.tiktokScraper.scrape).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('passes the token, route and device id to the checker', async () => {
+    const integrity = fakeIntegrity({ kind: 'genuine' });
+    const app = buildApp(makeDeps({ integrity }));
+    expect((await extract(app, { 'x-morsel-integrity-token': 'tok' })).statusCode).toBe(200);
+    expect(integrity.check).toHaveBeenCalledWith('tok', '/extract', 'device-1');
+    await app.close();
+  });
+
+  it('fails open when Google is unavailable or the caller has no token', async () => {
+    for (const outcome of [
+      { kind: 'error', reason: 'timeout' },
+      { kind: 'unverified', reason: 'no integrity token' },
+    ] as const) {
+      const app = buildApp(makeDeps({ integrity: fakeIntegrity(outcome) }));
+      expect((await extract(app)).statusCode).toBe(200);
+      await app.close();
+    }
+  });
+
+  it('only checks the AI routes', async () => {
+    const integrity = fakeIntegrity({ kind: 'rejected', reason: 'x' });
+    const app = buildApp(makeDeps({ integrity }));
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(integrity.check).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('rate-limits before spending a Google check', async () => {
+    const integrity = fakeIntegrity({ kind: 'genuine' });
+    const app = buildApp(makeDeps({ integrity, rateLimit: { max: 1, windowMs: 60_000 } }));
+    await extract(app);
+    expect((await extract(app)).statusCode).toBe(429);
+    expect(integrity.check).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  it('reports on /health whether attestation is configured', async () => {
+    const on = buildApp(makeDeps({ integrity: fakeIntegrity({ kind: 'genuine' }) }));
+    expect((await on.inject({ method: 'GET', url: '/health' })).json().playIntegrity).toBe(true);
+    await on.close();
+    const off = buildApp(makeDeps());
+    expect((await off.inject({ method: 'GET', url: '/health' })).json().playIntegrity).toBe(false);
+    await off.close();
   });
 });
 

@@ -13,6 +13,7 @@ import type { TikTokScraper } from './services/tiktok.js';
 import type { WebScraper } from './services/web.js';
 import { HttpError } from './lib/errors.js';
 import { createRequestGuard, DEFAULT_RATE_LIMIT, type RateLimitOptions } from './lib/guardrail.js';
+import type { IntegrityChecker } from './lib/integrity.js';
 import { createStore, type Store } from './lib/store.js';
 import { createUnconfiguredCommunityDb, type CommunityDb } from './lib/community-db.js';
 import { createUnconfiguredDiscoverDb, type DiscoverDb } from './lib/discover-db.js';
@@ -68,6 +69,8 @@ export interface AppDeps {
   nutrition: NutritionLookup;
   /** Shared secret guarding the expensive routes; empty disables the check (dev). */
   appSharedSecret: string;
+  /** Play Integrity attestation on `/extract` and `/improve`. Omitted = off (dev, tests). */
+  integrity?: IntegrityChecker;
   /**
    * Counter/cache backend. Omitted in tests, where each app gets its own
    * in-memory store so state can't leak between cases.
@@ -136,7 +139,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // Shared-secret + per-IP rate limit on the expensive routes (see guardrail.ts).
   app.addHook(
     'onRequest',
-    createRequestGuard(deps.appSharedSecret, store, deps.rateLimit ?? DEFAULT_RATE_LIMIT),
+    createRequestGuard(deps.appSharedSecret, store, deps.rateLimit ?? DEFAULT_RATE_LIMIT, deps.integrity),
   );
 
   // `store` reports which backend is active, so a deploy can be verified from
@@ -147,6 +150,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // `appKey` says whether the shared-secret guard is configured. It is strictly
   // a boolean - never the value, a prefix, a length or a hash - because /health
   // is public. It tells a missing APP_SHARED_SECRET apart from a mismatched one.
+  // `playIntegrity` is the same kind of boolean, for the attestation key.
   //
   // `cache` is this month's hit rate. On the free Apify tier that number decides
   // how far $5 stretches: every hit is an extraction nobody paid for.
@@ -184,6 +188,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       status: 'ok',
       store: store.kind,
       appKey: Boolean(deps.appSharedSecret),
+      playIntegrity: Boolean(deps.integrity),
       cache: {
         month: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`,
         hits: hit,

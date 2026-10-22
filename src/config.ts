@@ -85,6 +85,16 @@ export interface Config {
    */
   appSharedSecret: string;
   /**
+   * Path to the Play Integrity service-account key (MORSE-41). On Render this is
+   * a Secret File, mounted at `/etc/secrets/<name>`. Empty disables attestation
+   * (local dev, where builds aren't from Play and can't pass it anyway). Must be
+   * the dedicated `morsel-integrity` account, never the EAS submit one: that key
+   * can publish releases, and this one sits on a public-facing server.
+   */
+  playIntegrityKeyFile: string;
+  /** The Play package tokens must be minted for. Mirrors `android.package` in app.json. */
+  androidPackageName: string;
+  /**
    * Upstash Redis REST credentials backing the rate limit, the per-device quota
    * and the extraction cache. Empty falls back to an in-memory store, which is
    * fine locally but resets on every cold start — set both in production.
@@ -294,6 +304,8 @@ export function loadConfig(): Config {
     offContactEmail: process.env.OFF_CONTACT_EMAIL ?? '',
     port: Number(process.env.PORT ?? 3000),
     appSharedSecret: trimmedFromEnv('APP_SHARED_SECRET'),
+    playIntegrityKeyFile: trimmedFromEnv('PLAY_INTEGRITY_KEY_FILE'),
+    androidPackageName: trimmedFromEnv('ANDROID_PACKAGE_NAME') || 'com.savr.myapp',
     upstashUrl: trimmedFromEnv('UPSTASH_REDIS_REST_URL'),
     upstashToken: trimmedFromEnv('UPSTASH_REDIS_REST_TOKEN'),
     monthlyDeviceExtractionLimit: numberFromEnv('MONTHLY_DEVICE_EXTRACTION_LIMIT', 30),
