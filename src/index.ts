@@ -99,10 +99,26 @@ const app = buildApp({
 });
 
 if (!config.appSharedSecret) {
+  // Fail closed in production: an empty secret turns the guard off for every AI
+  // and lookup route, and a warning in a log nobody reads is how that ships.
+  // The Dockerfile sets NODE_ENV=production, so this only bites deployed builds.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'APP_SHARED_SECRET is unset in production - refusing to start with /extract, /improve, ' +
+        "/image-search and /nutrition open to any caller. Set it to match the app's EXPO_PUBLIC_APP_KEY.",
+    );
+  }
   app.log.warn(
     'APP_SHARED_SECRET is unset - /extract, /improve, /image-search and /nutrition accept ' +
       'any caller. Fine locally; in a deployed environment set it and match it with the ' +
       "app's EXPO_PUBLIC_APP_KEY.",
+  );
+}
+
+if (!config.usdaApiKey) {
+  app.log.warn(
+    "USDA_API_KEY is unset - /nutrition uses USDA's shared DEMO_KEY, which is rate-limited " +
+      'across every caller on the internet using it. Set a real key in any deployed environment.',
   );
 }
 

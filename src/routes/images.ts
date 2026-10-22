@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { PhotoSearch } from '../services/images.js';
-import { badRequest } from '../lib/errors.js';
+import { requireQuery } from '../lib/query.js';
 
 interface ImageSearchDeps {
   photoSearch: PhotoSearch;
@@ -10,9 +10,6 @@ interface ImageSearchDeps {
 interface ImageSearchBody {
   query?: unknown;
 }
-
-/** Longest dish name we'll forward. Recipe titles are short; anything longer is noise. */
-const MAX_QUERY_LENGTH = 200;
 
 /**
  * Registers `POST /image-search`. Body: `{ query }`. Returns `{ url }` - the
@@ -24,14 +21,7 @@ const MAX_QUERY_LENGTH = 200;
  */
 export function registerImageSearchRoute(app: FastifyInstance, deps: ImageSearchDeps): void {
   app.post<{ Body: ImageSearchBody }>('/image-search', async (request) => {
-    const raw = request.body?.query;
-    const query = typeof raw === 'string' ? raw.trim() : '';
-    if (!query) {
-      throw badRequest('A query is required.');
-    }
-    if (query.length > MAX_QUERY_LENGTH) {
-      throw badRequest('That query is too long.');
-    }
+    const query = requireQuery(request.body?.query);
 
     return { url: await deps.photoSearch.search(query) };
   });
