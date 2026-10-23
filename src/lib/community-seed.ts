@@ -121,7 +121,7 @@ export const SEED_POSTS: SeedPost[] = [
     id: id(15),
     title: 'Sync across devices',
     body: 'Back up and access your recipes everywhere.',
-    status: 'planned',
+    status: 'in_progress',
   },
 ];
 

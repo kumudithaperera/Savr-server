@@ -22,5 +22,5 @@ values
   ('00000000-0000-4000-8000-000000000012', 'morsel-team', 'Adjust to Taste', 'Tell the AI to dial any ingredient up or down - sugar, salt, gluten, dairy, spice, and more - and it rebalances the rest of the recipe to match.', 'shipped', now() - interval '11 minutes', now() - interval '11 minutes'),
   ('00000000-0000-4000-8000-000000000013', 'morsel-team', 'Smart Planner', 'Plan your week around your calories.', 'shipped', now() - interval '12 minutes', now() - interval '12 minutes'),
   ('00000000-0000-4000-8000-000000000014', 'morsel-team', 'Grocery lists', 'Auto-build shopping lists from your recipes and meal plan.', 'planned', null, now() - interval '13 minutes'),
-  ('00000000-0000-4000-8000-000000000015', 'morsel-team', 'Sync across devices', 'Back up and access your recipes everywhere.', 'planned', null, now() - interval '14 minutes')
+  ('00000000-0000-4000-8000-000000000015', 'morsel-team', 'Sync across devices', 'Back up and access your recipes everywhere.', 'in_progress', null, now() - interval '14 minutes')
 on conflict (id) do nothing;
