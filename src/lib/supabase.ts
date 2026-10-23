@@ -88,7 +88,9 @@ export interface Supabase {
   /**
    * Deletes the account the caller's JWT belongs to. Supabase resolves the token
    * to a user first, so the id deleted is never one the caller chose. Their
-   * `subscriptions` row goes with it (`on delete cascade`).
+   * `subscriptions` row and synced library rows go with it (`on delete
+   * cascade`); their synced photos are removed first, since Storage doesn't
+   * cascade.
    */
   deleteUserForToken(token: string): Promise<DeleteOutcome>;
 }
@@ -129,6 +131,13 @@ interface CachedEntitlement {
  *
  * Supabase access tokens rotate roughly hourly, so entries turn over on their own.
  */
+/**
+ * The private bucket the app syncs recipe photos into (supabase/006_sync.sql),
+ * one folder per user id. Storage doesn't cascade from `auth.users`, so account
+ * deletion empties the user's folder itself.
+ */
+export const SYNC_IMAGE_BUCKET = 'user-recipe-images';
+
 function tokenKey(token: string): string {
   return `ent:tok:${createHash('sha256').update(token).digest('hex').slice(0, 32)}`;
 }
@@ -151,6 +160,44 @@ export function createSupabase(
     'content-type': 'application/json',
     ...extra,
   });
+
+  /**
+   * Removes every synced photo in the user's folder. Returns false if that
+   * couldn't be confirmed, so the account isn't deleted with their photos left
+   * behind under an id nobody can sign in as any more. A bucket that doesn't
+   * exist (006 never run) holds nothing to remove.
+   */
+  async function purgeSyncedImages(userId: string): Promise<boolean> {
+    const prefix = `${userId}/`;
+    for (let round = 0; round < 50; round++) {
+      const list = await doFetch(`${base}/storage/v1/object/list/${SYNC_IMAGE_BUCKET}`, {
+        method: 'POST',
+        headers: serviceHeaders(),
+        body: JSON.stringify({ prefix, limit: 1000, offset: 0 }),
+      });
+      if (list.status === 400 || list.status === 404) return true;
+      if (!list.ok) {
+        warn(`supabase: synced image list failed (${list.status})`);
+        return false;
+      }
+      const objects = (await list.json()) as { name?: unknown }[];
+      const names = (Array.isArray(objects) ? objects : [])
+        .map((object) => object?.name)
+        .filter((name): name is string => typeof name === 'string' && name.length > 0);
+      if (names.length === 0) return true;
+      const removed = await doFetch(`${base}/storage/v1/object/${SYNC_IMAGE_BUCKET}`, {
+        method: 'DELETE',
+        headers: serviceHeaders(),
+        body: JSON.stringify({ prefixes: names.map((name) => `${prefix}${name}`) }),
+      });
+      if (!removed.ok) {
+        warn(`supabase: synced image delete failed (${removed.status})`);
+        return false;
+      }
+    }
+    warn('supabase: synced image purge did not finish');
+    return false;
+  }
 
   async function readFromSupabase(token: string): Promise<SubscriptionRow | null> {
     // `limit=1` is belt and braces - RLS already restricts this to one row, and
@@ -252,7 +299,10 @@ export function createSupabase(
         const user = (await who.json()) as { id?: unknown };
         if (typeof user?.id !== 'string' || !user.id) return 'unauthorized';
 
-        // 2. Delete with the service role. 404 means it is already gone, which is
+        // 2. Their synced photos (Storage doesn't cascade from auth.users).
+        if (!(await purgeSyncedImages(user.id))) return 'failed';
+
+        // 3. Delete with the service role. 404 means it is already gone, which is
         // what the caller asked for.
         const removed = await doFetch(
           `${base}/auth/v1/admin/users/${encodeURIComponent(user.id)}`,
