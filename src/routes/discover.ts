@@ -12,7 +12,8 @@ import {
 } from '../lib/community-kit.js';
 import type { DiscoverDb, DiscoverSort, IndexListRow, IndexRow } from '../lib/discover-db.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
-import { facetDto, parseFilters } from '../lib/recipe-facets.js';
+import { facetDto, hasFilters, parseFilters } from '../lib/recipe-facets.js';
+import { cachedSnapshot } from '../lib/snapshot-cache.js';
 import type { Store } from '../lib/store.js';
 import type { ExtractedRecipe } from '../lib/types.js';
 
@@ -121,12 +122,21 @@ export function registerDiscoverRoutes(app: FastifyInstance, deps: DiscoverOptio
     const query = asQuery(request);
     const sort = SORTS.includes(query.sort as DiscoverSort) ? (query.sort as DiscoverSort) : 'popular';
     const offset = offsetOf(query.cursor);
-    const rows = await db.search({
-      filters: parseFilters(query),
-      sort,
-      offset,
-      limit: DISCOVER_LIMITS.pageSize + 1,
-    });
+    const filters = parseFilters(query);
+    const search = (): Promise<IndexListRow[]> =>
+      db.search({ filters, sort, offset, limit: DISCOVER_LIMITS.pageSize + 1 });
+    // The first page of an unfiltered sort is identical for every caller and is
+    // what almost every visit asks for, so it comes from a shared snapshot
+    // instead of a Supabase query per device. Searches and filters stay live.
+    const rows =
+      offset === 0 && !hasFilters(filters)
+        ? await cachedSnapshot({
+            store,
+            key: `discover:search:${sort}`,
+            refresh: search,
+            warn: (message) => request.log.warn(message),
+          })
+        : await search();
     const page = rows.slice(0, DISCOVER_LIMITS.pageSize);
     return {
       items: page.map(toItemDto),

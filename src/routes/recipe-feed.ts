@@ -17,7 +17,14 @@ import type { DiscoverDb } from '../lib/discover-db.js';
 import { knownFacets, rememberFacets } from '../lib/discover-indexer.js';
 import { deriveFacets } from '../lib/facet-rules.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
-import { facetColumns, facetDto, parseFilters, storedFacets, type RecipeFacets } from '../lib/recipe-facets.js';
+import {
+  facetColumns,
+  facetDto,
+  hasFilters,
+  parseFilters,
+  storedFacets,
+  type RecipeFacets,
+} from '../lib/recipe-facets.js';
 import type {
   FeedCommentRow,
   FeedPlatform,
@@ -26,6 +33,7 @@ import type {
   RecipeFeedDb,
   SharedRecipe,
 } from '../lib/recipe-feed-db.js';
+import { cachedSnapshot, invalidateSnapshots } from '../lib/snapshot-cache.js';
 import type { Store } from '../lib/store.js';
 import { CATEGORIES, type Category } from '../lib/types.js';
 import { canonicalCacheKey, publicShareUrl } from '../lib/url.js';
@@ -103,6 +111,8 @@ export const FEED_DAILY_CAPS = {
 type FeedWrite = keyof typeof FEED_DAILY_CAPS;
 
 const SORTS: FeedSort[] = ['new', 'popular', 'most_remixed'];
+/** Shared first-page snapshots, one per sort. Dropped when a post changes. */
+const LIST_SNAPSHOT_KEYS = SORTS.map((sort) => `feed:list:${sort}`);
 const PLATFORMS: FeedPlatform[] = ['instagram', 'tiktok', 'web', 'manual'];
 
 // --- DTOs ---------------------------------------------------------------------
@@ -442,13 +452,24 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const sort = SORTS.includes(query.sort as FeedSort) ? (query.sort as FeedSort) : 'new';
     const offset = offsetOf(query.cursor);
     const me = callerOf(request);
-    const rows = await db.list({
-      filters: parseFilters(query),
-      sort,
-      offset,
-      limit: FEED_LIMITS.pageSize + 1,
-      excludeAuthors: await blockedBy(me),
-    });
+    const filters = parseFilters(query);
+    const blocked = await blockedBy(me);
+    const list = (excludeAuthors: string[]): Promise<FeedPostRow[]> =>
+      db.list({ filters, sort, offset, limit: FEED_LIMITS.pageSize + 1, excludeAuthors });
+    // The default first page is the same rows for every caller; only `isMine`
+    // and the caller's blocks differ, so the shared snapshot holds raw rows and
+    // both are applied per request. Searches and filters stay live.
+    const rows =
+      offset === 0 && !hasFilters(filters)
+        ? (
+            await cachedSnapshot({
+              store,
+              key: `feed:list:${sort}`,
+              refresh: () => list([]),
+              warn: (message) => request.log.warn(message),
+            })
+          ).filter((row) => !blocked.includes(row.author_hash))
+        : await list(blocked);
     const page = rows.slice(0, FEED_LIMITS.pageSize);
     return {
       posts: page.map((row) => toPostDto(row, me)),
@@ -495,6 +516,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
 
     const columns = await enrich(request, input, [parent]);
     const row = await db.insert({ ...columns, author_hash: me, remix_of: remixOf });
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     request.log.info({ postId: row.id, remixOf }, 'feed: recipe shared');
     return reply.status(201).send({ post: toPostDto(row, me) });
   });
@@ -511,6 +533,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     // A re-share without a new photo keeps the one already published.
     const row = await db.update(id, { ...columns, image_url: columns.image_url ?? post.image_url });
     if (!row) throw notFound();
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     return { post: toPostDto(row, me) };
   });
 
@@ -521,6 +544,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const post = await db.get(id);
     if (!post || !me || post.author_hash !== me || post.removed) throw notFound();
     await db.remove(id);
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     return { deleted: true };
   });
 

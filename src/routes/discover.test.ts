@@ -251,3 +251,30 @@ describe('discover routes', () => {
     expect(saved.recipe.imageRemoteUrl).toBe('https://example.com/salad.jpg');
   });
 });
+
+describe('Discover list snapshots', () => {
+  it('builds the default first page once for every caller', async () => {
+    const { db, indexer, as } = setup();
+    await indexer.index('ig:ABC123', recipe());
+
+    const search = vi.spyOn(db, 'search');
+    const first = await as('alice').get('/discover/search');
+    const second = await as('bob').get('/discover/search');
+
+    expect(first.statusCode).toBe(200);
+    expect(second.body).toBe(first.body);
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps searches and filters live', async () => {
+    const { db, indexer, as } = setup();
+    await indexer.index('ig:ABC123', recipe());
+
+    const search = vi.spyOn(db, 'search');
+    await as(null).get('/discover/search');
+    await as(null).get('/discover/search?q=chicken');
+    await as(null).get('/discover/search?q=chicken');
+
+    expect(search).toHaveBeenCalledTimes(3);
+  });
+});
