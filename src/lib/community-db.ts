@@ -73,10 +73,18 @@ export interface ListPostsQuery {
   excludeAuthors: string[];
 }
 
+/** The two columns the board's counts need. */
+export interface PostKind {
+  status: PostStatus;
+  author_hash: string;
+}
+
 export interface CommunityDb {
   /** False when no backend is configured; the route then answers 503. */
   readonly configured: boolean;
   listPosts(query: ListPostsQuery): Promise<PostRow[]>;
+  /** Status and author of every visible post in `statuses` - just enough to count the board. */
+  listPostKinds(query: Pick<ListPostsQuery, 'statuses' | 'excludeAuthors'>): Promise<PostKind[]>;
   getPost(id: string): Promise<PostRow | null>;
   getComment(id: string): Promise<CommentRow | null>;
   /** Visible comments of a post (not hidden, not removed), oldest first. */
@@ -172,6 +180,15 @@ export function createSupabaseCommunityDb(
         `community_posts?select=*&${filters.join('&')}&order=${order}` +
           `&offset=${query.offset}&limit=${query.limit}`,
       );
+    },
+
+    async listPostKinds(query) {
+      const filters = [
+        `status=in.${inList(query.statuses)}`,
+        'hidden=is.false',
+        query.excludeAuthors.length > 0 ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
+      ].filter(Boolean);
+      return request<PostKind[]>(`community_posts?select=status,author_hash&${filters.join('&')}`);
     },
 
     async getPost(id) {
@@ -379,6 +396,12 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
       return rows.slice(query.offset, query.offset + query.limit).map((p) => ({ ...p }));
     },
 
+    async listPostKinds(query) {
+      return [...posts.values()]
+        .filter((p) => query.statuses.includes(p.status) && !p.hidden && !query.excludeAuthors.includes(p.author_hash))
+        .map((p) => ({ status: p.status, author_hash: p.author_hash }));
+    },
+
     async getPost(id) {
       const post = posts.get(id);
       return post ? { ...post } : null;
@@ -511,6 +534,7 @@ export function createUnconfiguredCommunityDb(): CommunityDb {
   return {
     configured: false,
     listPosts: refuse,
+    listPostKinds: refuse,
     getPost: refuse,
     getComment: refuse,
     listComments: refuse,

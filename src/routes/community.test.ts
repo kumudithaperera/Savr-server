@@ -269,6 +269,27 @@ describe('community board', () => {
     expect((await as('dave').get('/community/posts?tab=nope')).statusCode).toBe(400);
   });
 
+  it('counts each tab on the first page, and how many shipped ideas came from the community', async () => {
+    const { as, db, createPost } = setup();
+    const before = (await as('dave').get('/community/posts?tab=ideas')).json().counts;
+    const a = await createPost('alice', 'An open idea');
+    const b = await createPost('bob', 'A planned idea');
+    const c = await createPost('carol', 'A shipped idea');
+    db.admin.setStatus(b.id, 'in_progress');
+    db.admin.setStatus(c.id, 'shipped', '1.0.22');
+    expect(a.id).toBeTruthy();
+
+    const counts = (await as('dave').get('/community/posts?tab=shipped')).json().counts;
+    expect(counts).toEqual({
+      ideas: before.ideas + 1,
+      planned: before.planned + 1,
+      shipped: before.shipped + 1,
+      shippedFromCommunity: before.shippedFromCommunity + 1,
+    });
+    // Later pages don't repeat them.
+    expect((await as('dave').get('/community/posts?tab=ideas&cursor=20')).json().counts).toBeUndefined();
+  });
+
   it('pages with a cursor', async () => {
     const { as, db } = setup();
     for (let i = 0; i < 25; i++) await db.insertPost({ author_hash: `h${i}`, title: `Idea ${i}`, body: '' });
