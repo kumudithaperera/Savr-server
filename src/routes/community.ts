@@ -48,6 +48,15 @@ export interface CommunityOptions {
   hashPepper: string;
 }
 
+/** Board totals sent with the first page of any tab. */
+export interface BoardCounts {
+  ideas: number;
+  planned: number;
+  shipped: number;
+  /** Shipped ideas that were community suggestions, not the Morsel team's. */
+  shippedFromCommunity: number;
+}
+
 export const COMMUNITY_LIMITS = {
   titleMin: 5,
   titleMax: 80,
@@ -202,6 +211,24 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     return post;
   }
 
+  /**
+   * How many posts each tab holds, and how many shipped ideas came from the
+   * community rather than the Morsel team, for what the caller can see.
+   */
+  async function boardCounts(excludeAuthors: string[]): Promise<BoardCounts> {
+    const kinds = await db.listPostKinds({
+      statuses: ['open', 'planned', 'in_progress', 'shipped'],
+      excludeAuthors,
+    });
+    const shipped = kinds.filter((k) => k.status === 'shipped');
+    return {
+      ideas: kinds.filter((k) => k.status === 'open').length,
+      planned: kinds.filter((k) => k.status === 'planned' || k.status === 'in_progress').length,
+      shipped: shipped.length,
+      shippedFromCommunity: shipped.filter((k) => k.author_hash !== TEAM_AUTHOR_HASH).length,
+    };
+  }
+
   // --- reads --------------------------------------------------------------
 
   app.get('/community/posts', async (request) => {
@@ -227,9 +254,13 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     const page = rows.slice(0, COMMUNITY_LIMITS.pageSize);
     const votes = me ? await db.votesBy(me, page.map((p) => p.id)) : new Map<string, 1 | -1>();
 
+    // Counts ride along with the first page only: they label the tabs and headings.
+    const counts = offset === 0 ? await boardCounts(excludeAuthors) : undefined;
+
     return {
       posts: page.map((row) => toPostDto(row, me, votes.get(row.id) ?? 0)),
       nextCursor: rows.length > page.length ? String(offset + page.length) : null,
+      ...(counts ? { counts } : {}),
     };
   });
 
