@@ -2,8 +2,10 @@ import { createHash, createHmac } from 'node:crypto';
 
 import type { FastifyRequest } from 'fastify';
 
+import { bearerToken } from './entitlement.js';
 import { badRequest } from './errors.js';
 import { deviceIdOf } from './grants.js';
+import type { Supabase } from './supabase.js';
 
 /**
  * Pieces shared by every accountless community surface: the ideas board
@@ -69,6 +71,32 @@ export function createCommunityIdentity(pepper: string): CommunityIdentity {
       return `Cook ${tag.slice(0, 4).toUpperCase()}`;
     },
   };
+}
+
+/**
+ * The signed-in account behind a request, for blocks that follow the user to
+ * other devices. Community surfaces stay accountless otherwise: this is only
+ * consulted for blocks. A missing, invalid or unverifiable token is "signed
+ * out", never an error - the caller falls back to device-only blocks.
+ */
+export type AccountOf = (request: FastifyRequest) => Promise<string | null>;
+
+export function createAccountResolver(supabase: Supabase | undefined): AccountOf {
+  return async (request) => {
+    const token = bearerToken(request);
+    if (!token || !supabase) return null;
+    try {
+      return await supabase.userIdForToken(token);
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** Who is asking, for block reads: the device, the account, or both. */
+export interface BlockCaller {
+  hash: string | null;
+  userId: string | null;
 }
 
 /**

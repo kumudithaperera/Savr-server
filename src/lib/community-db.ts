@@ -21,6 +21,7 @@
 
 import { randomUUID } from 'node:crypto';
 
+import type { BlockCaller } from './community-kit.js';
 import { TEAM_AUTHOR_HASH, type SeedPost } from './community-seed.js';
 
 /** Distinct reporters that hide an item until an admin looks. Mirrors the SQL trigger. */
@@ -35,6 +36,22 @@ export type ReportReason =
   | 'off_topic'
   | 'other';
 export type TargetType = 'post' | 'comment';
+/**
+ * What a report row can carry. `blocked` is filed alongside a block: admins see
+ * it, but it never counts towards `REPORT_HIDE_THRESHOLD`.
+ */
+export type StoredReason = ReportReason | 'blocked';
+
+/** One person someone blocked, as Profile -> Blocked users lists it. */
+export interface BlockEntry {
+  /** Opaque handle the app unblocks by. Never the blocked author's hash. */
+  id: string;
+  name: string | null;
+  created_at: string;
+}
+
+/** Above this many blocked authors, feeds filter in memory instead of in the URL. */
+export const MAX_URL_EXCLUSIONS = 200;
 
 export interface PostRow {
   id: string;
@@ -108,11 +125,22 @@ export interface CommunityDb {
     target_type: TargetType;
     target_id: string;
     reporter_hash: string;
-    reason: ReportReason;
+    reason: StoredReason;
     note: string | null;
   }): Promise<'recorded' | 'duplicate'>;
-  insertBlock(blockerHash: string, blockedHash: string): Promise<void>;
-  blockedBy(blockerHash: string): Promise<string[]>;
+  /**
+   * Records a block. A signed-in caller's block goes on the account, so it
+   * follows them to every device; otherwise it is kept for this device only.
+   */
+  insertBlock(caller: { hash: string; userId: string | null }, blockedHash: string, name: string | null): Promise<void>;
+  /** Author hashes the caller blocked, from this device and their account. */
+  blockedBy(caller: BlockCaller): Promise<string[]>;
+  /** The caller's blocks, one per blocked author, newest first. */
+  listBlocks(caller: BlockCaller): Promise<BlockEntry[]>;
+  /** Unblocks, from the device and the account. False when `id` isn't the caller's. */
+  deleteBlock(caller: BlockCaller, id: string): Promise<boolean>;
+  /** Moves this device's blocks onto the account (after sign-in). Returns how many. */
+  claimBlocks(hash: string, userId: string): Promise<number>;
   isBanned(authorHash: string): Promise<boolean>;
 }
 
@@ -128,6 +156,18 @@ export interface SupabaseCommunityConfig {
 /** PostgREST `in.(...)` list. Values are hex hashes or uuids, but quote anyway. */
 function inList(values: string[]): string {
   return `(${values.map((v) => `"${v.replace(/["\\]/g, '')}"`).join(',')})`;
+}
+
+/** One entry per blocked author (the first row wins), newest first. */
+function toEntries(rows: { id: string; blocked_hash: string; blocked_name: string | null; created_at: string }[]): BlockEntry[] {
+  const seen = new Set<string>();
+  const entries: BlockEntry[] = [];
+  for (const row of rows) {
+    if (seen.has(row.blocked_hash)) continue;
+    seen.add(row.blocked_hash);
+    entries.push({ id: row.id, name: row.blocked_name, created_at: row.created_at });
+  }
+  return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
 export function createSupabaseCommunityDb(
@@ -161,6 +201,49 @@ export function createSupabaseCommunityDb(
 
   const enc = encodeURIComponent;
 
+  const ORDER: Record<ListPostsQuery['sort'], string> = {
+    top: 'score.desc,created_at.desc',
+    new: 'created_at.desc',
+    shipped: 'shipped_at.desc.nullslast,created_at.desc',
+  };
+
+  /**
+   * `listPosts` for a caller with more blocks than fit in a URL: reads pages in
+   * order and drops blocked authors here, until `offset + limit` survivors.
+   */
+  async function listPostsFiltered(query: ListPostsQuery): Promise<PostRow[]> {
+    const excluded = new Set(query.excludeAuthors);
+    const wanted = query.offset + query.limit;
+    const kept: PostRow[] = [];
+    const batch = 200;
+    for (let from = 0; kept.length < wanted && from < 20_000; from += batch) {
+      const rows = await request<PostRow[]>(
+        `community_posts?select=*&status=in.${inList(query.statuses)}&hidden=is.false` +
+          `&order=${ORDER[query.sort]}&offset=${from}&limit=${batch}`,
+      );
+      kept.push(...rows.filter((row) => !excluded.has(row.author_hash)));
+      if (rows.length < batch) break;
+    }
+    return kept.slice(query.offset, wanted);
+  }
+
+  type BlockRow = { id: string; blocked_hash: string; blocked_name: string | null; created_at: string };
+
+  /** The caller's device rows and account rows, in one list. */
+  async function blockRows(caller: BlockCaller, select: string): Promise<BlockRow[]> {
+    const [device, account] = await Promise.all([
+      caller.hash
+        ? request<BlockRow[]>(`community_blocks?select=${select}&blocker_hash=eq.${enc(caller.hash)}&limit=1000`)
+        : Promise.resolve([]),
+      caller.userId
+        ? request<BlockRow[]>(
+            `community_account_blocks?select=${select}&user_id=eq.${enc(caller.userId)}&limit=1000`,
+          )
+        : Promise.resolve([]),
+    ]);
+    return [...account, ...device];
+  }
+
   return {
     configured,
 
@@ -170,25 +253,24 @@ export function createSupabaseCommunityDb(
         'hidden=is.false',
         query.excludeAuthors.length > 0 ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
       ].filter(Boolean);
-      const order =
-        query.sort === 'top'
-          ? 'score.desc,created_at.desc'
-          : query.sort === 'shipped'
-            ? 'shipped_at.desc.nullslast,created_at.desc'
-            : 'created_at.desc';
+      if (query.excludeAuthors.length > MAX_URL_EXCLUSIONS) return listPostsFiltered(query);
       return request<PostRow[]>(
-        `community_posts?select=*&${filters.join('&')}&order=${order}` +
+        `community_posts?select=*&${filters.join('&')}&order=${ORDER[query.sort]}` +
           `&offset=${query.offset}&limit=${query.limit}`,
       );
     },
 
     async listPostKinds(query) {
+      const tooMany = query.excludeAuthors.length > MAX_URL_EXCLUSIONS;
       const filters = [
         `status=in.${inList(query.statuses)}`,
         'hidden=is.false',
-        query.excludeAuthors.length > 0 ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
+        query.excludeAuthors.length > 0 && !tooMany ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
       ].filter(Boolean);
-      return request<PostKind[]>(`community_posts?select=status,author_hash&${filters.join('&')}`);
+      const rows = await request<PostKind[]>(`community_posts?select=status,author_hash&${filters.join('&')}`);
+      if (!tooMany) return rows;
+      const excluded = new Set(query.excludeAuthors);
+      return rows.filter((row) => !excluded.has(row.author_hash));
     },
 
     async getPost(id) {
@@ -281,22 +363,76 @@ export function createSupabaseCommunityDb(
       return 'recorded';
     },
 
-    async insertBlock(blockerHash, blockedHash) {
-      await request(
-        'community_blocks?on_conflict=blocker_hash,blocked_hash',
-        {
-          method: 'POST',
-          headers: { prefer: 'resolution=ignore-duplicates,return=minimal' },
-          body: JSON.stringify({ blocker_hash: blockerHash, blocked_hash: blockedHash }),
-        },
-      );
+    async insertBlock(caller, blockedHash, name) {
+      const [path, row] = caller.userId
+        ? [
+            'community_account_blocks?on_conflict=user_id,blocked_hash',
+            { user_id: caller.userId, blocked_hash: blockedHash, blocked_name: name },
+          ]
+        : [
+            'community_blocks?on_conflict=blocker_hash,blocked_hash',
+            { blocker_hash: caller.hash, blocked_hash: blockedHash, blocked_name: name },
+          ];
+      await request(path, {
+        method: 'POST',
+        headers: { prefer: 'resolution=ignore-duplicates,return=minimal' },
+        body: JSON.stringify(row),
+      });
     },
 
-    async blockedBy(blockerHash) {
-      const rows = await request<{ blocked_hash: string }[]>(
-        `community_blocks?select=blocked_hash&blocker_hash=eq.${enc(blockerHash)}&limit=1000`,
+    async blockedBy(caller) {
+      const rows = await blockRows(caller, 'blocked_hash');
+      return [...new Set(rows.map((row) => row.blocked_hash))];
+    },
+
+    async listBlocks(caller) {
+      return toEntries(await blockRows(caller, 'id,blocked_hash,blocked_name,created_at'));
+    },
+
+    async deleteBlock(caller, id) {
+      const [device, account] = await Promise.all([
+        caller.hash
+          ? request<{ blocked_hash: string }[]>(
+              `community_blocks?select=blocked_hash&id=eq.${enc(id)}&blocker_hash=eq.${enc(caller.hash)}&limit=1`,
+            )
+          : Promise.resolve([]),
+        caller.userId
+          ? request<{ blocked_hash: string }[]>(
+              `community_account_blocks?select=blocked_hash&id=eq.${enc(id)}&user_id=eq.${enc(caller.userId)}&limit=1`,
+            )
+          : Promise.resolve([]),
+      ]);
+      const blocked = device[0]?.blocked_hash ?? account[0]?.blocked_hash;
+      if (!blocked) return false;
+      const gone = { method: 'DELETE', headers: { prefer: 'return=minimal' } };
+      await Promise.all([
+        caller.hash
+          ? request(`community_blocks?blocker_hash=eq.${enc(caller.hash)}&blocked_hash=eq.${enc(blocked)}`, gone)
+          : Promise.resolve(),
+        caller.userId
+          ? request(`community_account_blocks?user_id=eq.${enc(caller.userId)}&blocked_hash=eq.${enc(blocked)}`, gone)
+          : Promise.resolve(),
+      ]);
+      return true;
+    },
+
+    async claimBlocks(hash, userId) {
+      const rows = await request<{ blocked_hash: string; blocked_name: string | null; created_at: string }[]>(
+        `community_blocks?select=blocked_hash,blocked_name,created_at&blocker_hash=eq.${enc(hash)}&limit=1000`,
       );
-      return rows.map((row) => row.blocked_hash);
+      if (rows.length === 0) return 0;
+      await request('community_account_blocks?on_conflict=user_id,blocked_hash', {
+        method: 'POST',
+        headers: { prefer: 'resolution=ignore-duplicates,return=minimal' },
+        body: JSON.stringify(rows.map((row) => ({ user_id: userId, ...row }))),
+      });
+      // Off the device once they're on the account, so an unblock on another
+      // phone can't be undone by a stale copy left here.
+      await request(`community_blocks?blocker_hash=eq.${enc(hash)}`, {
+        method: 'DELETE',
+        headers: { prefer: 'return=minimal' },
+      });
+      return rows.length;
     },
 
     async isBanned(authorHash) {
@@ -321,13 +457,19 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
     setStatus(id: string, status: PostStatus, shippedVersion?: string): void;
     ban(authorHash: string): void;
     posts(): PostRow[];
+    /** `${type}|${id}|${reporter}|${'blocked' | 'report'}` for every report row. */
+    reports(): string[];
   };
 } {
   const posts = new Map<string, PostRow>();
   const comments = new Map<string, CommentRow>();
   const votes = new Map<string, 1 | -1>(); // `${postId}|${voter}`
-  const reports = new Set<string>(); // `${type}|${id}|${reporter}`
-  const blocks = new Set<string>(); // `${blocker}|${blocked}`
+  const reports = new Set<string>(); // `${type}|${id}|${reporter}|${'blocked' | 'report'}`
+  type MemoryBlock = { id: string; owner: string; blocked_hash: string; blocked_name: string | null; created_at: string };
+  // Keyed `${owner}|${blocked}`; owner is a device hash or `user:${id}`.
+  const blocks = new Map<string, MemoryBlock>();
+  const ownersOf = (caller: BlockCaller) =>
+    [caller.userId ? `user:${caller.userId}` : null, caller.hash].filter((o): o is string => Boolean(o));
   const banned = new Set<string>();
   let last = 0;
 
@@ -480,11 +622,13 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
     },
 
     async insertReport(row) {
-      const key = `${row.target_type}|${row.target_id}|${row.reporter_hash}`;
+      const kind = row.reason === 'blocked' ? 'blocked' : 'report';
+      const key = `${row.target_type}|${row.target_id}|${row.reporter_hash}|${kind}`;
       if (reports.has(key)) return 'duplicate';
       reports.add(key);
+      if (kind === 'blocked') return 'recorded';
       const prefix = `${row.target_type}|${row.target_id}|`;
-      const count = [...reports].filter((r) => r.startsWith(prefix)).length;
+      const count = [...reports].filter((r) => r.startsWith(prefix) && r.endsWith('|report')).length;
       const target = row.target_type === 'post' ? posts.get(row.target_id) : comments.get(row.target_id);
       if (target) {
         target.report_count = count;
@@ -494,14 +638,43 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
       return 'recorded';
     },
 
-    async insertBlock(blockerHash, blockedHash) {
-      blocks.add(`${blockerHash}|${blockedHash}`);
+    async insertBlock(caller, blockedHash, name) {
+      const owner = caller.userId ? `user:${caller.userId}` : caller.hash;
+      const key = `${owner}|${blockedHash}`;
+      if (blocks.has(key)) return;
+      blocks.set(key, { id: randomUUID(), owner, blocked_hash: blockedHash, blocked_name: name, created_at: now() });
     },
 
-    async blockedBy(blockerHash) {
-      return [...blocks]
-        .filter((b) => b.startsWith(`${blockerHash}|`))
-        .map((b) => b.slice(blockerHash.length + 1));
+    async blockedBy(caller) {
+      const owners = ownersOf(caller);
+      return [...new Set([...blocks.values()].filter((b) => owners.includes(b.owner)).map((b) => b.blocked_hash))];
+    },
+
+    async listBlocks(caller) {
+      const owners = ownersOf(caller);
+      // Account rows first, as the Supabase read returns them.
+      const rows = [...blocks.values()]
+        .filter((b) => owners.includes(b.owner))
+        .sort((a, b) => owners.indexOf(a.owner) - owners.indexOf(b.owner));
+      return toEntries(rows);
+    },
+
+    async deleteBlock(caller, id) {
+      const owners = ownersOf(caller);
+      const row = [...blocks.values()].find((b) => b.id === id && owners.includes(b.owner));
+      if (!row) return false;
+      for (const owner of owners) blocks.delete(`${owner}|${row.blocked_hash}`);
+      return true;
+    },
+
+    async claimBlocks(hash, userId) {
+      const mine = [...blocks.values()].filter((b) => b.owner === hash);
+      for (const row of mine) {
+        const key = `user:${userId}|${row.blocked_hash}`;
+        if (!blocks.has(key)) blocks.set(key, { ...row, id: randomUUID(), owner: `user:${userId}` });
+        blocks.delete(`${hash}|${row.blocked_hash}`);
+      }
+      return mine.length;
     },
 
     async isBanned(authorHash) {
@@ -521,6 +694,9 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
       },
       posts() {
         return [...posts.values()].map((p) => ({ ...p }));
+      },
+      reports() {
+        return [...reports];
       },
     },
   };
@@ -547,6 +723,9 @@ export function createUnconfiguredCommunityDb(): CommunityDb {
     insertReport: refuse,
     insertBlock: refuse,
     blockedBy: refuse,
+    listBlocks: refuse,
+    deleteBlock: refuse,
+    claimBlocks: refuse,
     isBanned: refuse,
   };
 }

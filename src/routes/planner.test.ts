@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from '../app.js';
@@ -34,6 +36,7 @@ async function setup() {
   const discoverDb = createMemoryDiscoverDb();
   const recipeFeedDb = createMemoryRecipeFeedDb();
   const store = createStore({ upstashUrl: '', upstashToken: '' });
+  const communityDb = createMemoryCommunityDb();
   const app = buildApp({
     instagramScraper: { scrape: vi.fn() },
     tiktokScraper: { scrape: vi.fn() },
@@ -44,7 +47,7 @@ async function setup() {
     nutrition: { search: vi.fn(async () => null) },
     appSharedSecret: '',
     store,
-    communityDb: createMemoryCommunityDb(),
+    communityDb,
     discoverDb,
     recipeFeedDb,
     communityHashPepper: PEPPER,
@@ -95,7 +98,7 @@ async function setup() {
       payload: payload as object,
     });
 
-  return { ask };
+  return { ask, communityDb };
 }
 
 describe('POST /planner/candidates', () => {
@@ -121,6 +124,16 @@ describe('POST /planner/candidates', () => {
     const res = await ask({ dietTags: ['vegetarian'], excluded: ['Peanut'], minKcal: 450, maxKcal: 900, limit: 20 });
     const titles = res.json().candidates.map((c: { title: string }) => c.title);
     expect(titles).toEqual(['Veggie tacos']);
+  });
+
+  it('leaves out recipes from authors the caller blocked', async () => {
+    const { ask, communityDb } = await setup();
+    const hash = createHash('sha256').update(`${PEPPER}:device-1`).digest('hex');
+    await communityDb.insertBlock({ hash, userId: null }, 'someone-else', null);
+    const titles = (await ask({ minKcal: 200, maxKcal: 1000, limit: 20 })).json().candidates.map((c: { title: string }) => c.title);
+    expect(titles).not.toContain('Veggie tacos');
+    const other = (await ask({ minKcal: 200, maxKcal: 1000, limit: 20 }, 'device-2')).json().candidates;
+    expect(other.map((c: { title: string }) => c.title)).toContain('Veggie tacos');
   });
 
   it('needs a device id', async () => {

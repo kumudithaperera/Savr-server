@@ -93,6 +93,12 @@ export interface Supabase {
    * cascade.
    */
   deleteUserForToken(token: string): Promise<DeleteOutcome>;
+  /**
+   * The Supabase user id the caller's JWT belongs to, verified by Supabase Auth.
+   * Null for no token, an invalid or expired one, or when Auth can't be
+   * reached - callers treat null as "signed out", never as an error.
+   */
+  userIdForToken(token: string): Promise<string | null>;
 }
 
 type Fetch = typeof fetch;
@@ -141,6 +147,14 @@ export const SYNC_IMAGE_BUCKET = 'user-recipe-images';
 function tokenKey(token: string): string {
   return `ent:tok:${createHash('sha256').update(token).digest('hex').slice(0, 32)}`;
 }
+
+/** Cache key for a token's verified user id. Same whole-token hashing as above. */
+function userKey(token: string): string {
+  return `auth:uid:${createHash('sha256').update(token).digest('hex').slice(0, 32)}`;
+}
+
+/** How long a verified user id is reused. Tokens live about an hour. */
+const USER_TTL_SECONDS = 5 * 60;
 
 export function createSupabase(
   config: SupabaseConfig,
@@ -282,6 +296,33 @@ export function createSupabase(
       }
     },
 
+    async userIdForToken(token: string): Promise<string | null> {
+      if (!configured || !token) return null;
+      const cached = await store.getJson<{ id: string | null }>(userKey(token));
+      if (cached) return cached.id;
+      try {
+        // Supabase verifies the token. Never read `sub` out of the JWT ourselves.
+        const who = await doFetch(`${base}/auth/v1/user`, {
+          headers: { apikey: config.anonKey, authorization: `Bearer ${token}` },
+        });
+        if (who.status === 401 || who.status === 403) {
+          await store.setJson(userKey(token), { id: null }, USER_TTL_SECONDS);
+          return null;
+        }
+        if (!who.ok) {
+          warn(`supabase: user lookup failed (${who.status})`);
+          return null;
+        }
+        const user = (await who.json()) as { id?: unknown };
+        const id = typeof user?.id === 'string' && user.id ? user.id : null;
+        await store.setJson(userKey(token), { id }, USER_TTL_SECONDS);
+        return id;
+      } catch (error) {
+        warn(`supabase: user lookup threw (${String(error)})`);
+        return null;
+      }
+    },
+
     async deleteUserForToken(token: string): Promise<DeleteOutcome> {
       if (!canWrite || !config.anonKey || !token) return 'failed';
       try {
@@ -316,6 +357,7 @@ export function createSupabase(
         // The cached entitlement for this token would otherwise keep answering
         // "plus" for up to five minutes after the row was cascaded away.
         await store.setJson(tokenKey(token), { row: null, at: Date.now() } satisfies CachedEntitlement, STALE_TTL_SECONDS);
+        await store.setJson(userKey(token), { id: null }, USER_TTL_SECONDS);
         return 'deleted';
       } catch (error) {
         warn(`supabase: account delete threw (${String(error)})`);
