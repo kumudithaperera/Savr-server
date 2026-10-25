@@ -1,12 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { CommunityDb } from '../lib/community-db.js';
-import { asBody, createCommunityIdentity } from '../lib/community-kit.js';
+import { asBody, createAccountResolver, createCommunityIdentity } from '../lib/community-kit.js';
 import type { DiscoverDb } from '../lib/discover-db.js';
 import { HttpError, rateLimited } from '../lib/errors.js';
 import { DIET_TAGS, facetDto, plannerTerms, type DietTag, type RecipeFilters } from '../lib/recipe-facets.js';
 import type { RecipeFeedDb } from '../lib/recipe-feed-db.js';
 import type { Store } from '../lib/store.js';
+import type { Supabase } from '../lib/supabase.js';
 
 /**
  * Smart Planner: recipes from outside someone's cookbook, for the meal slots
@@ -30,6 +31,8 @@ export interface PlannerOptions {
   communityDb: CommunityDb;
   store: Store;
   hashPepper: string;
+  /** Resolves a signed-in caller, so their account's blocks apply. Absent = device-only. */
+  supabase?: Supabase;
 }
 
 export const PLANNER_LIMITS = { maxCandidates: 60 } as const;
@@ -58,6 +61,7 @@ function kcal(raw: unknown, fallback: number): number {
 export function registerPlannerRoutes(app: FastifyInstance, deps: PlannerOptions): void {
   const { discoverDb, recipeFeedDb, communityDb, store } = deps;
   const { callerOf } = createCommunityIdentity(deps.hashPepper);
+  const accountOf = createAccountResolver(deps.supabase);
 
   app.post('/planner/candidates', async (request) => {
     if (!discoverDb.configured && !recipeFeedDb.configured) {
@@ -95,10 +99,14 @@ export function registerPlannerRoutes(app: FastifyInstance, deps: PlannerOptions
 
     // Half from each source, topped up by whichever has more.
     const half = Math.ceil(limit / 2);
+    // People the caller blocked don't come back as suggestions either.
+    const blocked = communityDb.configured
+      ? await communityDb.blockedBy({ hash: me, userId: await accountOf(request) })
+      : [];
     const [web, posts] = await Promise.all([
       discoverDb.configured ? discoverDb.plannerSearch(filters, limit) : Promise.resolve([]),
       recipeFeedDb.configured
-        ? recipeFeedDb.list({ filters, sort: 'popular', offset: 0, limit, excludeAuthors: [me] })
+        ? recipeFeedDb.list({ filters, sort: 'popular', offset: 0, limit, excludeAuthors: [me, ...blocked] })
         : Promise.resolve([]),
     ]);
 

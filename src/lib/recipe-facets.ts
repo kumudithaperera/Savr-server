@@ -106,6 +106,20 @@ export function parseFilters(query: Record<string, string | undefined>): RecipeF
   };
 }
 
+/**
+ * Whether anything narrows the list. The default first page of a sort is the
+ * same for every caller; any filter makes it a per-query result.
+ */
+export function hasFilters(filters: RecipeFilters): boolean {
+  return (
+    filters.terms.length > 0 ||
+    filters.category !== null ||
+    filters.diet.length > 0 ||
+    filters.maxCalories !== null ||
+    filters.maxMinutes !== null
+  );
+}
+
 /** PostgREST query params for the filters (already URL-safe: see `searchTerms`). */
 export function filterParams(filters: RecipeFilters): string[] {
   const params: string[] = [];

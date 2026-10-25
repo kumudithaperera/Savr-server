@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { REPORT_HIDE_THRESHOLD } from './community-db.js';
+import { MAX_URL_EXCLUSIONS, REPORT_HIDE_THRESHOLD } from './community-db.js';
 import { createPostgrest, inList, type PostgrestConfig } from './postgrest.js';
 import {
   filterParams,
@@ -150,15 +150,29 @@ export function createSupabaseRecipeFeedDb(
     configured: db.configured,
 
     async list(query) {
+      const tooMany = query.excludeAuthors.length > MAX_URL_EXCLUSIONS;
       const params = [
         visible,
-        query.excludeAuthors.length > 0 ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
+        query.excludeAuthors.length > 0 && !tooMany ? `author_hash=not.in.${inList(query.excludeAuthors)}` : '',
         ...filterParams(query.filters),
       ].filter(Boolean);
-      return db.request<FeedPostRow[]>(
-        `recipe_posts?select=*&${params.join('&')}&order=${ORDER[query.sort]}` +
-          `&offset=${query.offset}&limit=${query.limit}`,
-      );
+      const page = (offset: number, limit: number) =>
+        db.request<FeedPostRow[]>(
+          `recipe_posts?select=*&${params.join('&')}&order=${ORDER[query.sort]}&offset=${offset}&limit=${limit}`,
+        );
+      if (!tooMany) return page(query.offset, query.limit);
+
+      // More blocks than fit in a URL: read in order and drop them here.
+      const excluded = new Set(query.excludeAuthors);
+      const wanted = query.offset + query.limit;
+      const kept: FeedPostRow[] = [];
+      const batch = 200;
+      for (let from = 0; kept.length < wanted && from < 20_000; from += batch) {
+        const rows = await page(from, batch);
+        kept.push(...rows.filter((row) => !excluded.has(row.author_hash)));
+        if (rows.length < batch) break;
+      }
+      return kept.slice(query.offset, wanted);
     },
 
     async get(id) {
@@ -254,7 +268,7 @@ export function createMemoryRecipeFeedDb(): RecipeFeedDb & {
   const posts = new Map<string, FeedPostRow>();
   const comments = new Map<string, FeedCommentRow>();
   const saves = new Set<string>(); // `${postId}|${saver}`
-  const reports = new Set<string>(); // `${type}|${id}|${reporter}`
+  const reports = new Set<string>(); // `${type}|${id}|${reporter}|${'blocked' | 'report'}`
   let last = 0;
   const now = () => {
     last = Math.max(Date.now(), last + 1);
@@ -385,10 +399,15 @@ export function createMemoryRecipeFeedDb(): RecipeFeedDb & {
     },
 
     async insertReport(row) {
-      const key = `${row.target_type}|${row.target_id}|${row.reporter_hash}`;
+      // A 'blocked' signal is kept apart and never counts towards hiding (007_blocks.sql).
+      const kind = row.reason === 'blocked' ? 'blocked' : 'report';
+      const key = `${row.target_type}|${row.target_id}|${row.reporter_hash}|${kind}`;
       if (reports.has(key)) return 'duplicate';
       reports.add(key);
-      const count = [...reports].filter((r) => r.startsWith(`${row.target_type}|${row.target_id}|`)).length;
+      if (kind === 'blocked') return 'recorded';
+      const count = [...reports].filter(
+        (r) => r.startsWith(`${row.target_type}|${row.target_id}|`) && r.endsWith('|report'),
+      ).length;
       const target = row.target_type === 'recipe_post' ? posts.get(row.target_id) : comments.get(row.target_id);
       if (target) {
         target.report_count = count;

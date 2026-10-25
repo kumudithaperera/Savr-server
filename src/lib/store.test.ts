@@ -37,3 +37,12 @@ describe('Upstash store during an outage', () => {
     expect(await store.getJson('cache:x')).toBeNull();
   });
 });
+
+describe('memory store', () => {
+  it('forgets a value on del so the next reader rebuilds it', async () => {
+    const store = createStore({ upstashUrl: '', upstashToken: '' });
+    await store.setJson('snapshot', { value: 1 });
+    await store.del('snapshot');
+    expect(await store.getJson('snapshot')).toBeNull();
+  });
+});

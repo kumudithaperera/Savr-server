@@ -372,3 +372,31 @@ describe('community recipe feed', () => {
     });
   });
 });
+
+describe('community list snapshots', () => {
+  it('builds the default first page once but still hides each caller\'s blocks', async () => {
+    const { db, as, share } = setup();
+    const dal = await share('alice');
+    await share('bob', { recipe: shared({ title: 'Bob’s dal' }) });
+
+    const list = vi.spyOn(db, 'list');
+    expect((await as('carol').get('/community/recipes')).json().posts).toHaveLength(2);
+
+    await as('carol').post('/community/recipes/blocks', { targetType: 'recipe', targetId: dal.id });
+    const hers = (await as('carol').get('/community/recipes')).json().posts;
+    expect(hers).toHaveLength(1);
+    expect(hers[0].title).toBe('Bob’s dal');
+
+    expect((await as('dave').get('/community/recipes')).json().posts).toHaveLength(2);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a new share on the next list request', async () => {
+    const { as, share } = setup();
+    await share('alice');
+    await as(null).get('/community/recipes');
+
+    await share('bob', { recipe: shared({ title: 'New dal' }) });
+    expect((await as(null).get('/community/recipes')).json().posts).toHaveLength(2);
+  });
+});

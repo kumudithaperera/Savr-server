@@ -53,6 +53,11 @@ export interface Store {
    * `server/README.md`.
    */
   setJsonIfAbsent(key: string, value: unknown, ttlSeconds?: number): Promise<boolean>;
+  /**
+   * Removes `key`, so the next reader rebuilds it. Best-effort like the rest:
+   * a failure is swallowed and the value simply expires on its own TTL.
+   */
+  del(key: string): Promise<void>;
 }
 
 export interface StoreConfig {
@@ -133,6 +138,9 @@ function createMemoryStore(): Store {
         expiresAt: ttlSeconds == null ? Infinity : now + ttlSeconds * 1000,
       });
       return true;
+    },
+    async del(key) {
+      entries.delete(key);
     },
   };
 }
@@ -222,6 +230,13 @@ function createUpstashStore(config: StoreConfig, warn: Warn): Store {
       } catch (err) {
         warn(`[store] SET NX ${key} failed, claiming in-process: ${(err as Error).message}`);
         return fallback.setJsonIfAbsent(key, value, ttlSeconds);
+      }
+    },
+    async del(key) {
+      try {
+        await pipeline([['DEL', key]]);
+      } catch (err) {
+        warn(`[store] DEL ${key} failed, leaving the value to expire: ${(err as Error).message}`);
       }
     },
   };

@@ -9,9 +9,17 @@ import type {
   TargetType,
 } from '../lib/community-db.js';
 import { TEAM_AUTHOR_HASH } from '../lib/community-seed.js';
-import { asBody, cleanText, createCommunityIdentity, requireUuid } from '../lib/community-kit.js';
+import {
+  asBody,
+  cleanText,
+  createAccountResolver,
+  createCommunityIdentity,
+  requireUuid,
+  type BlockCaller,
+} from '../lib/community-kit.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
 import type { Store } from '../lib/store.js';
+import type { Supabase } from '../lib/supabase.js';
 import { localCheck, type ContentModerator } from '../services/moderation.js';
 
 /**
@@ -46,6 +54,16 @@ export interface CommunityOptions {
   moderator?: ContentModerator;
   /** Server-only secret mixed into `author_hash`. */
   hashPepper: string;
+  /** Resolves a signed-in caller, so their blocks follow the account. Absent = device-only. */
+  supabase?: Supabase;
+}
+
+/** One entry in Profile -> Blocked users. */
+export interface BlockDto {
+  id: string;
+  /** Null for blocks made before names were kept; the app shows a placeholder. */
+  name: string | null;
+  createdAt: string;
 }
 
 /** Board totals sent with the first page of any tab. */
@@ -155,7 +173,13 @@ const notFound = () => new HttpError(404, 'not_found', 'This idea is no longer a
 export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOptions): void {
   const { db, store, moderator } = deps;
 
-  const { callerOf } = createCommunityIdentity(deps.hashPepper);
+  const { callerOf, handleOf } = createCommunityIdentity(deps.hashPepper);
+  const accountOf = createAccountResolver(deps.supabase);
+
+  /** The device and (if signed in) account whose blocks apply to this request. */
+  async function blockCaller(request: FastifyRequest, me: string | null = callerOf(request)): Promise<BlockCaller> {
+    return { hash: me, userId: await accountOf(request) };
+  }
 
   function ensureConfigured(): void {
     if (!db.configured) {
@@ -242,7 +266,8 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     const offset = Math.max(0, Math.min(10_000, Number.parseInt(query.cursor ?? '0', 10) || 0));
 
     const me = callerOf(request);
-    const excludeAuthors = me ? await db.blockedBy(me) : [];
+    const caller = await blockCaller(request, me);
+    const excludeAuthors = me || caller.userId ? await db.blockedBy(caller) : [];
     const rows = await db.listPosts({
       statuses: tab.statuses,
       sort,
@@ -273,7 +298,9 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     const [comments, votes, blocked] = await Promise.all([
       db.listComments(id),
       me ? db.votesBy(me, [id]) : Promise.resolve(new Map<string, 1 | -1>()),
-      me ? db.blockedBy(me) : Promise.resolve([] as string[]),
+      blockCaller(request, me).then((caller) =>
+        caller.hash || caller.userId ? db.blockedBy(caller) : ([] as string[]),
+      ),
     ]);
     if (blocked.includes(post.author_hash)) throw notFound();
     const visible = comments.filter((c) => !blocked.includes(c.author_hash));
@@ -403,9 +430,58 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     const { targetType, targetId } = parseTarget(asBody(request));
     const me = await writer(request, 'block');
     const author = await authorOf(targetType, targetId);
-    if (author === me) throw badRequest("You can't hide your own posts.");
-    if (author === TEAM_AUTHOR_HASH) throw badRequest("Posts from the Morsel team can't be hidden.");
-    await db.insertBlock(me, author);
+    if (author === me) throw badRequest("You can't block yourself.");
+    if (author === TEAM_AUTHOR_HASH) throw badRequest("The Morsel team can't be blocked.");
+    // Board authors have no display name; the handle is what Blocked users shows.
+    await db.insertBlock({ hash: me, userId: await accountOf(request) }, author, handleOf(author));
+    // Moderators see who gets blocked, but it never hides anything by itself.
+    const outcome = await db.insertReport({
+      target_type: targetType,
+      target_id: targetId,
+      reporter_hash: me,
+      reason: 'blocked',
+      note: null,
+    });
+    request.log.info({ targetType, targetId, outcome }, 'community: block');
     return { blocked: true };
+  });
+
+  // --- Blocked users (shared by the board and the recipe feed) ---------------
+
+  app.get('/community/blocks', async (request) => {
+    ensureConfigured();
+    const caller = await blockCaller(request);
+    if (!caller.hash && !caller.userId) return { blocks: [] as BlockDto[] };
+    const entries = await db.listBlocks(caller);
+    return {
+      blocks: entries.map(
+        (entry): BlockDto => ({ id: entry.id, name: entry.name, createdAt: entry.created_at }),
+      ),
+    };
+  });
+
+  app.delete('/community/blocks/:id', async (request) => {
+    const id = requireUuid((request.params as { id?: string }).id, 'block');
+    ensureConfigured();
+    // Not `writer()`: undoing your own block needs no cap, and a ban shouldn't stop it.
+    const caller = await blockCaller(request);
+    if (!caller.hash && !caller.userId) {
+      throw new HttpError(400, 'device_required', 'Update the app to join the conversation.');
+    }
+    const removed = await db.deleteBlock(caller, id);
+    // Same answer for "not yours" and "doesn't exist".
+    if (!removed) throw new HttpError(404, 'not_found', 'This person is no longer blocked.');
+    return { unblocked: true };
+  });
+
+  /** Called once after sign-in: this device's blocks move onto the account. */
+  app.post('/community/blocks/claim', async (request) => {
+    ensureConfigured();
+    const me = callerOf(request);
+    if (!me) throw new HttpError(400, 'device_required', 'Update the app to join the conversation.');
+    const userId = await accountOf(request);
+    if (!userId) throw new HttpError(401, 'unauthorized', 'Sign in to keep your blocks on your account.');
+    const claimed = await db.claimBlocks(me, userId);
+    return { claimed };
   });
 }

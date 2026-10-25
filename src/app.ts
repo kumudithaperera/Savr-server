@@ -249,6 +249,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     store,
     moderator,
     hashPepper: deps.communityHashPepper ?? '',
+    supabase,
   });
   registerDiscoverRoutes(app, {
     db: discoverDb,
@@ -264,6 +265,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     moderator,
     rehoster,
     hashPepper: deps.communityHashPepper ?? '',
+    supabase,
   });
   registerPlannerRoutes(app, {
     discoverDb,
@@ -271,6 +273,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     communityDb,
     store,
     hashPepper: deps.communityHashPepper ?? '',
+    supabase,
   });
   registerGroceryRoutes(app, { store, foodProfiler: deps.foodProfiler });
   registerRevenueCatWebhook(app, {

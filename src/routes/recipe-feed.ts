@@ -6,6 +6,7 @@ import {
   asQuery,
   cleanDisplayName,
   cleanText,
+  createAccountResolver,
   createCommunityIdentity,
   offsetOf,
   REPORT_REASONS,
@@ -17,7 +18,14 @@ import type { DiscoverDb } from '../lib/discover-db.js';
 import { knownFacets, rememberFacets } from '../lib/discover-indexer.js';
 import { deriveFacets } from '../lib/facet-rules.js';
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
-import { facetColumns, facetDto, parseFilters, storedFacets, type RecipeFacets } from '../lib/recipe-facets.js';
+import {
+  facetColumns,
+  facetDto,
+  hasFilters,
+  parseFilters,
+  storedFacets,
+  type RecipeFacets,
+} from '../lib/recipe-facets.js';
 import type {
   FeedCommentRow,
   FeedPlatform,
@@ -26,7 +34,9 @@ import type {
   RecipeFeedDb,
   SharedRecipe,
 } from '../lib/recipe-feed-db.js';
+import { cachedSnapshot, invalidateSnapshots } from '../lib/snapshot-cache.js';
 import type { Store } from '../lib/store.js';
+import type { Supabase } from '../lib/supabase.js';
 import { CATEGORIES, type Category } from '../lib/types.js';
 import { canonicalCacheKey, publicShareUrl } from '../lib/url.js';
 import {
@@ -76,6 +86,8 @@ export interface RecipeFeedOptions {
   moderator?: ContentModerator;
   rehoster: ImageRehoster;
   hashPepper: string;
+  /** Resolves a signed-in caller, so their blocks follow the account. Absent = device-only. */
+  supabase?: Supabase;
 }
 
 export const FEED_LIMITS = {
@@ -103,6 +115,8 @@ export const FEED_DAILY_CAPS = {
 type FeedWrite = keyof typeof FEED_DAILY_CAPS;
 
 const SORTS: FeedSort[] = ['new', 'popular', 'most_remixed'];
+/** Shared first-page snapshots, one per sort. Dropped when a post changes. */
+const LIST_SNAPSHOT_KEYS = SORTS.map((sort) => `feed:list:${sort}`);
 const PLATFORMS: FeedPlatform[] = ['instagram', 'tiktok', 'web', 'manual'];
 
 // --- DTOs ---------------------------------------------------------------------
@@ -235,6 +249,7 @@ const commentNotFound = () => new HttpError(404, 'not_found', 'This suggestion i
 export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedOptions): void {
   const { db, communityDb, store, moderator } = deps;
   const { callerOf, handleOf } = createCommunityIdentity(deps.hashPepper);
+  const accountOf = createAccountResolver(deps.supabase);
 
   const nameOf = (row: { author_hash: string; author_name: string | null }) =>
     row.author_name ?? handleOf(row.author_hash);
@@ -290,8 +305,12 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     return me;
   }
 
-  const blockedBy = async (me: string | null): Promise<string[]> =>
-    me && communityDb.configured ? communityDb.blockedBy(me) : [];
+  /** Authors this device, or the account it is signed into, has blocked. */
+  async function blockedBy(request: FastifyRequest, me: string | null): Promise<string[]> {
+    if (!communityDb.configured) return [];
+    const userId = await accountOf(request);
+    return me || userId ? communityDb.blockedBy({ hash: me, userId }) : [];
+  }
 
   /**
    * Local checks, then the AI moderator. `typed` is what the person wrote
@@ -362,10 +381,10 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     return copies;
   }
 
-  async function visiblePost(id: string, me: string | null): Promise<FeedPostRow> {
+  async function visiblePost(id: string, blocked: string[]): Promise<FeedPostRow> {
     const post = await db.get(id);
     if (!post || post.hidden || post.removed) throw notFound();
-    if ((await blockedBy(me)).includes(post.author_hash)) throw notFound();
+    if (blocked.includes(post.author_hash)) throw notFound();
     return post;
   }
 
@@ -442,13 +461,24 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const sort = SORTS.includes(query.sort as FeedSort) ? (query.sort as FeedSort) : 'new';
     const offset = offsetOf(query.cursor);
     const me = callerOf(request);
-    const rows = await db.list({
-      filters: parseFilters(query),
-      sort,
-      offset,
-      limit: FEED_LIMITS.pageSize + 1,
-      excludeAuthors: await blockedBy(me),
-    });
+    const filters = parseFilters(query);
+    const blocked = await blockedBy(request, me);
+    const list = (excludeAuthors: string[]): Promise<FeedPostRow[]> =>
+      db.list({ filters, sort, offset, limit: FEED_LIMITS.pageSize + 1, excludeAuthors });
+    // The default first page is the same rows for every caller; only `isMine`
+    // and the caller's blocks differ, so the shared snapshot holds raw rows and
+    // both are applied per request. Searches and filters stay live.
+    const rows =
+      offset === 0 && !hasFilters(filters)
+        ? (
+            await cachedSnapshot({
+              store,
+              key: `feed:list:${sort}`,
+              refresh: () => list([]),
+              warn: (message) => request.log.warn(message),
+            })
+          ).filter((row) => !blocked.includes(row.author_hash))
+        : await list(blocked);
     const page = rows.slice(0, FEED_LIMITS.pageSize);
     return {
       posts: page.map((row) => toPostDto(row, me)),
@@ -460,8 +490,8 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     ensureConfigured();
     const id = requireUuid((request.params as { id?: string }).id, 'recipe');
     const me = callerOf(request);
-    const post = await visiblePost(id, me);
-    const blocked = await blockedBy(me);
+    const blocked = await blockedBy(request, me);
+    const post = await visiblePost(id, blocked);
 
     const [parent, remixes, comments] = await Promise.all([
       post.remix_of ? db.get(post.remix_of) : Promise.resolve(null),
@@ -491,10 +521,11 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const input = await prepare(request);
     const remixOf = input.body.remixOf == null ? null : requireUuid(input.body.remixOf, 'original recipe');
     const me = await writer(request, 'post');
-    const parent = remixOf ? await visiblePost(remixOf, me) : null;
+    const parent = remixOf ? await visiblePost(remixOf, await blockedBy(request, me)) : null;
 
     const columns = await enrich(request, input, [parent]);
     const row = await db.insert({ ...columns, author_hash: me, remix_of: remixOf });
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     request.log.info({ postId: row.id, remixOf }, 'feed: recipe shared');
     return reply.status(201).send({ post: toPostDto(row, me) });
   });
@@ -511,6 +542,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     // A re-share without a new photo keeps the one already published.
     const row = await db.update(id, { ...columns, image_url: columns.image_url ?? post.image_url });
     if (!row) throw notFound();
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     return { post: toPostDto(row, me) };
   });
 
@@ -521,13 +553,14 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const post = await db.get(id);
     if (!post || !me || post.author_hash !== me || post.removed) throw notFound();
     await db.remove(id);
+    await invalidateSnapshots(store, LIST_SNAPSHOT_KEYS);
     return { deleted: true };
   });
 
   app.post('/community/recipes/:id/save', async (request) => {
     const id = requireUuid((request.params as { id?: string }).id, 'recipe');
     const me = await writer(request, 'save');
-    const post = await visiblePost(id, me);
+    const post = await visiblePost(id, await blockedBy(request, me));
     if (post.author_hash !== me) await db.recordSave(id, me);
     const { recipe } = post;
     return {
@@ -555,7 +588,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     }
     const authorName = cleanDisplayName(body.authorName);
     const me = await writer(request, 'comment');
-    const post = await visiblePost(id, me);
+    const post = await visiblePost(id, await blockedBy(request, me));
     const typed = authorName ? `Display name: ${authorName}\n${text}` : text;
     const { needsReview } = await screen(typed, '', 'suggestion', request);
     const row = await db.insertComment({
@@ -593,10 +626,13 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
   });
 
   /** Author of a post or suggestion, or 404. Hidden items stay reportable/blockable. */
-  async function authorOf(targetType: 'recipe' | 'suggestion', targetId: string): Promise<string> {
+  async function authorOf(
+    targetType: 'recipe' | 'suggestion',
+    targetId: string,
+  ): Promise<{ author_hash: string; author_name: string | null }> {
     const target = targetType === 'recipe' ? await db.get(targetId) : await db.getComment(targetId);
     if (!target) throw notFound();
-    return target.author_hash;
+    return target;
   }
 
   function parseTarget(body: Record<string, unknown>) {
@@ -617,7 +653,7 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
       throw badRequest(`Notes can be at most ${FEED_LIMITS.reportNoteMax} characters.`);
     }
     const me = await writer(request, 'report');
-    const author = await authorOf(targetType, targetId);
+    const { author_hash: author } = await authorOf(targetType, targetId);
     if (author === me) throw badRequest("You can't report your own post.");
     const outcome = await db.insertReport({
       target_type: targetType === 'recipe' ? 'recipe_post' : 'recipe_comment',
@@ -634,9 +670,18 @@ export function registerRecipeFeedRoutes(app: FastifyInstance, deps: RecipeFeedO
     const { targetType, targetId } = parseTarget(asBody(request));
     const me = await writer(request, 'block');
     if (!communityDb.configured) throw new HttpError(503, 'feed_unavailable', 'Blocking is unavailable right now.');
-    const author = await authorOf(targetType, targetId);
-    if (author === me) throw badRequest("You can't hide your own posts.");
-    await communityDb.insertBlock(me, author);
+    const target = await authorOf(targetType, targetId);
+    if (target.author_hash === me) throw badRequest("You can't block yourself.");
+    await communityDb.insertBlock({ hash: me, userId: await accountOf(request) }, target.author_hash, nameOf(target));
+    // Moderators see who gets blocked, but it never hides anything by itself.
+    const outcome = await db.insertReport({
+      target_type: targetType === 'recipe' ? 'recipe_post' : 'recipe_comment',
+      target_id: targetId,
+      reporter_hash: me,
+      reason: 'blocked',
+      note: null,
+    });
+    request.log.info({ targetType, targetId, outcome }, 'feed: block');
     return { blocked: true };
   });
 }

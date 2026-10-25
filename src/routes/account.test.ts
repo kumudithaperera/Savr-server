@@ -11,6 +11,7 @@ function fakeSupabase(outcome: 'deleted' | 'unauthorized' | 'failed'): Supabase 
     recordEvent: vi.fn(async () => 'recorded' as const),
     applySubscription: vi.fn(async () => true),
     deleteUserForToken: vi.fn(async () => outcome),
+    userIdForToken: vi.fn(async () => null),
   };
 }
 
