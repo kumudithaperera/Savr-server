@@ -247,7 +247,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerCommunityRoutes(app, {
     db: communityDb,
     store,
-    moderator,
     hashPepper: deps.communityHashPepper ?? '',
     supabase,
   });

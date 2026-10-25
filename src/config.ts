@@ -229,8 +229,9 @@ export interface Config {
    */
   communityImageBucket: string;
   /**
-   * Gemini model for the small, frequent call: community moderation (which
-   * also tags a shared recipe on the side). Defaults to `gemini-2.5-flash-lite`,
+   * Gemini model for the small, frequent call: recipe-feed moderation (which
+   * also tags a shared recipe on the side). The ideas board uses rules only
+   * (`services/rule-moderation.ts`). Defaults to `gemini-2.5-flash-lite`,
    * never to `geminiModel`: free-tier quotas are per model, so falling back to
    * the extraction model would let posting eat the extraction allowance.
    */

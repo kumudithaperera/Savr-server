@@ -4,13 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from '../app.js';
 import { createMemoryCommunityDb } from '../lib/community-db.js';
-import { upstreamError } from '../lib/errors.js';
 import type { ContentModerator } from '../services/moderation.js';
 
 /**
  * The board's promises, pinned: authors are anonymous to everyone but the
  * admin, only an author can delete their own words, three distinct reports
- * hide an item, blocks and bans hold, and moderation fails closed for posts.
+ * hide an item, blocks and bans hold, and screening needs no AI model.
  */
 
 const PEPPER = 'test-pepper';
@@ -87,9 +86,8 @@ describe('community board', () => {
     expect(anon.json().code).toBe('device_required');
   });
 
-  it('rejects contact details and link spam before the moderator runs', async () => {
-    const moderator = { review: vi.fn(async () => ({ allowed: true as const })) };
-    const { as } = setup({ moderator });
+  it('rejects contact details and link spam', async () => {
+    const { as } = setup();
     const email = await as('alice').post('/community/posts', { title: 'Email me at a@b.com please' });
     const links = await as('alice').post('/community/posts', {
       title: 'Great deals here',
@@ -98,36 +96,37 @@ describe('community board', () => {
     expect(email.statusCode).toBe(422);
     expect(email.json().code).toBe('content_rejected');
     expect(links.statusCode).toBe(422);
+  });
+
+  it('screens with rules and never calls the AI moderator', async () => {
+    const moderator: ContentModerator = { review: vi.fn(async () => ({ allowed: true as const })) };
+    const { as, db } = setup({ moderator });
+    const res = await as('alice').post('/community/posts', { title: 'You are a total idiot dev' });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().code).toBe('content_rejected');
+    expect(db.admin.posts()).toHaveLength(0);
     expect(moderator.review).not.toHaveBeenCalled();
   });
 
-  it('rejects what the moderator rejects', async () => {
-    const moderator = { review: vi.fn(async () => ({ allowed: false as const, category: 'harassment' })) };
-    const { as, db } = setup({ moderator });
-    const res = await as('alice').post('/community/posts', { title: 'Something nasty here' });
+  it('refuses keyboard mash', async () => {
+    const { as, db } = setup();
+    const res = await as('alice').post('/community/posts', { title: 'asdfgh jklqwer' });
     expect(res.statusCode).toBe(422);
     expect(db.admin.posts()).toHaveLength(0);
   });
 
-  it('fails closed for posts and open-but-flagged for comments when moderation is down', async () => {
-    let down = false;
-    const moderator: ContentModerator = {
-      review: vi.fn(async () => {
-        if (down) throw upstreamError('gemini down');
-        return { allowed: true as const };
-      }),
-    };
-    const { as, db, createPost } = setup({ moderator });
-    const post = await createPost('alice');
+  it('publishes borderline posts and comments flagged for review', async () => {
+    const { as, db, createPost } = setup();
+    const clean = await createPost('alice');
+    const flagged = await as('bob').post('/community/posts', { title: 'Follow me for more recipe ideas' });
+    expect(flagged.statusCode).toBe(201);
+    const posts = db.admin.posts();
+    expect(posts.find((p) => p.id === clean.id)?.needs_review).toBe(false);
+    expect(posts.find((p) => p.id === flagged.json().post.id)?.needs_review).toBe(true);
 
-    down = true;
-    const blocked = await as('bob').post('/community/posts', { title: 'Another good idea' });
-    expect(blocked.statusCode).toBe(503);
-    expect(blocked.json().code).toBe('moderation_unavailable');
-
-    const comment = await as('bob').post(`/community/posts/${post.id}/comments`, { body: 'Yes please' });
+    const comment = await as('bob').post(`/community/posts/${clean.id}/comments`, { body: 'Check out my channel' });
     expect(comment.statusCode).toBe(201);
-    const stored = await db.listComments(post.id);
+    const stored = await db.listComments(clean.id);
     expect(stored[0].needs_review).toBe(true);
   });
 
@@ -292,7 +291,7 @@ describe('community board', () => {
 
   it('pages with a cursor', async () => {
     const { as, db } = setup();
-    for (let i = 0; i < 25; i++) await db.insertPost({ author_hash: `h${i}`, title: `Idea ${i}`, body: '' });
+    for (let i = 0; i < 25; i++) await db.insertPost({ author_hash: `h${i}`, title: `Idea ${i}`, body: '', needs_review: false });
     const first = (await as('dave').get('/community/posts?sort=new')).json();
     expect(first.posts).toHaveLength(20);
     expect(first.nextCursor).toBe('20');

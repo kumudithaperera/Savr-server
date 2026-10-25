@@ -106,7 +106,7 @@ export interface CommunityDb {
   getComment(id: string): Promise<CommentRow | null>;
   /** Visible comments of a post (not hidden, not removed), oldest first. */
   listComments(postId: string): Promise<CommentRow[]>;
-  insertPost(row: { author_hash: string; title: string; body: string }): Promise<PostRow>;
+  insertPost(row: { author_hash: string; title: string; body: string; needs_review: boolean }): Promise<PostRow>;
   insertComment(row: {
     post_id: string;
     author_hash: string;
@@ -572,7 +572,6 @@ export function createMemoryCommunityDb(options: { seed?: SeedPost[] } = {}): Co
         comment_count: 0,
         report_count: 0,
         hidden: false,
-        needs_review: false,
         created_at: now(),
       };
       posts.set(post.id, post);

@@ -20,7 +20,8 @@ import {
 import { badRequest, HttpError, rateLimited } from '../lib/errors.js';
 import type { Store } from '../lib/store.js';
 import type { Supabase } from '../lib/supabase.js';
-import { localCheck, type ContentModerator } from '../services/moderation.js';
+import { localCheck } from '../services/moderation.js';
+import { ruleCheck } from '../services/rule-moderation.js';
 
 /**
  * The community ideas board: anonymous feature requests, votes, comments,
@@ -34,12 +35,12 @@ import { localCheck, type ContentModerator } from '../services/moderation.js';
  * computed for the caller instead. A thread label is only stable within one
  * idea, so nobody can follow an author across threads.
  *
- * **Moderation.** Every post and comment passes `localCheck` and then the AI
- * moderator before it is stored. If the AI check can't run, a *post* is refused
- * (503) - an idea is the board's headline content - while a *comment* goes
- * through flagged `needs_review`, because refusing all replies during a Gemini
- * blip is worse than an admin skimming a few afterwards. Three distinct reports
- * hide anything that slipped through (`REPORT_HIDE_THRESHOLD`).
+ * **Moderation.** Every post and comment passes `localCheck` and then the
+ * rule-based `ruleCheck` before it is stored - no model call, so posting never
+ * waits on (or fails with) an AI provider. A clear violation is refused; a
+ * borderline one is published flagged `needs_review` for the admin queue.
+ * Three distinct reports hide anything that slipped through
+ * (`REPORT_HIDE_THRESHOLD`).
  *
  * **Abuse.** `/community/` is behind the app key and per-IP limit in
  * `guardrail.ts`; writes additionally get a per-device daily cap here. The
@@ -50,8 +51,6 @@ import { localCheck, type ContentModerator } from '../services/moderation.js';
 export interface CommunityOptions {
   db: CommunityDb;
   store: Store;
-  /** Absent = local checks only (tests, local dev without a Gemini key). */
-  moderator?: ContentModerator;
   /** Server-only secret mixed into `author_hash`. */
   hashPepper: string;
   /** Resolves a signed-in caller, so their blocks follow the account. Absent = device-only. */
@@ -171,7 +170,7 @@ const rejected = () =>
 const notFound = () => new HttpError(404, 'not_found', 'This idea is no longer available.');
 
 export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOptions): void {
-  const { db, store, moderator } = deps;
+  const { db, store } = deps;
 
   const { callerOf, handleOf } = createCommunityIdentity(deps.hashPepper);
   const accountOf = createAccountResolver(deps.supabase);
@@ -204,28 +203,22 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
   }
 
   /** Runs the screening. Returns whether the item must be flagged for review. */
-  async function screen(text: string, kind: 'post' | 'comment', request: FastifyRequest): Promise<boolean> {
+  function screen(text: string, kind: 'post' | 'comment', request: FastifyRequest): boolean {
     const local = localCheck(text);
     if (!local.allowed) {
       request.log.info({ category: local.category, kind }, 'community: rejected by local check');
       throw rejected();
     }
-    if (!moderator) return false;
-    try {
-      const verdict = await moderator.review(text, kind);
-      if (!verdict.allowed) {
-        request.log.info({ category: verdict.category, kind }, 'community: rejected by moderator');
-        throw rejected();
-      }
-      return false;
-    } catch (error) {
-      if (error instanceof HttpError && error.code === 'content_rejected') throw error;
-      request.log.warn({ err: error, kind }, 'community: moderation unavailable');
-      if (kind === 'post') {
-        throw new HttpError(503, 'moderation_unavailable', "We couldn't check your idea right now. Please try again shortly.");
-      }
+    const verdict = ruleCheck(text, kind);
+    if (verdict.action === 'reject') {
+      request.log.info({ category: verdict.category, kind }, 'community: rejected by rules');
+      throw rejected();
+    }
+    if (verdict.action === 'review') {
+      request.log.info({ category: verdict.category, kind }, 'community: flagged for review');
       return true;
     }
+    return false;
   }
 
   /** A post that exists and is visible to everyone. */
@@ -327,8 +320,8 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     }
 
     const me = await writer(request, 'post');
-    await screen(details ? `${title}\n\n${details}` : title, 'post', request);
-    const row = await db.insertPost({ author_hash: me, title, body: details });
+    const needsReview = screen(details ? `${title}\n\n${details}` : title, 'post', request);
+    const row = await db.insertPost({ author_hash: me, title, body: details, needs_review: needsReview });
     request.log.info({ postId: row.id }, 'community: post created');
     return reply.status(201).send({ post: toPostDto(row, me, 0) });
   });
@@ -364,7 +357,7 @@ export function registerCommunityRoutes(app: FastifyInstance, deps: CommunityOpt
     }
     const me = await writer(request, 'comment');
     const post = await visiblePost(id);
-    const needsReview = await screen(text, 'comment', request);
+    const needsReview = screen(text, 'comment', request);
     const row = await db.insertComment({ post_id: id, author_hash: me, body: text, needs_review: needsReview });
 
     // The new comment's thread label depends on who else has commented.
