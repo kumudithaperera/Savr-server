@@ -57,7 +57,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const off = stubOff(offValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off });
 
-    await expect(lookup.search('plain flour')).resolves.toEqual(usdaValue);
+    await expect(lookup.search('plain flour')).resolves.toEqual({ nutrition: usdaValue, source: 'usda' });
     expect(usda.search).toHaveBeenCalledWith('plain flour');
     expect(off.search).not.toHaveBeenCalled();
   });
@@ -67,7 +67,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const off = stubOff(offValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off });
 
-    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual(offValue);
+    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual({ nutrition: offValue, source: 'openfoodfacts' });
     expect(off.search).toHaveBeenCalledWith('Barilla spaghetti', { brandTokens: ['barilla'] });
     expect(usda.search).not.toHaveBeenCalled();
   });
@@ -77,7 +77,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const off = stubOff(null);
     const lookup = createBrandFirstNutritionLookup({ usda, off });
 
-    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual(usdaValue);
+    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual({ nutrition: usdaValue, source: 'usda' });
     expect(off.search).toHaveBeenCalledWith('Barilla spaghetti', { brandTokens: ['barilla'] });
     expect(usda.search).toHaveBeenCalledWith('Barilla spaghetti');
   });
@@ -87,7 +87,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const off = stubOff('throw');
     const lookup = createBrandFirstNutritionLookup({ usda, off });
 
-    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual(usdaValue);
+    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual({ nutrition: usdaValue, source: 'usda' });
     expect(usda.search).toHaveBeenCalledWith('Barilla spaghetti');
   });
 
@@ -96,7 +96,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const off = stubOff(offValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off });
 
-    await expect(lookup.search('   ')).resolves.toEqual(usdaValue);
+    await expect(lookup.search('   ')).resolves.toEqual({ nutrition: usdaValue, source: 'usda' });
     expect(usda.search).toHaveBeenCalledWith('   ');
     expect(off.search).not.toHaveBeenCalled();
   });
@@ -107,7 +107,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const deepseek = stubLookup(deepseekValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off, deepseek });
 
-    await expect(lookup.search('plain flour')).resolves.toEqual(deepseekValue);
+    await expect(lookup.search('plain flour')).resolves.toEqual({ nutrition: deepseekValue, source: 'deepseek' });
     expect(usda.search).toHaveBeenCalledWith('plain flour');
     expect(off.search).not.toHaveBeenCalled();
     expect(deepseek.search).toHaveBeenCalledWith('plain flour');
@@ -119,7 +119,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const deepseek = stubLookup(deepseekValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off, deepseek });
 
-    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual(deepseekValue);
+    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual({ nutrition: deepseekValue, source: 'deepseek' });
     expect(off.search).toHaveBeenCalledWith('Barilla spaghetti', { brandTokens: ['barilla'] });
     expect(usda.search).toHaveBeenCalledWith('Barilla spaghetti');
     expect(deepseek.search).toHaveBeenCalledWith('Barilla spaghetti');
@@ -139,7 +139,7 @@ describe('createBrandFirstNutritionLookup', () => {
     const deepseek = stubLookup(deepseekValue);
     const lookup = createBrandFirstNutritionLookup({ usda, off, deepseek });
 
-    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual(deepseekValue);
+    await expect(lookup.search('Barilla spaghetti')).resolves.toEqual({ nutrition: deepseekValue, source: 'deepseek' });
     expect(deepseek.search).toHaveBeenCalledWith('Barilla spaghetti');
   });
 });

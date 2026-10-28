@@ -86,6 +86,15 @@ export interface NutritionLookup {
   search(query: string): Promise<FoodNutrition | null>;
 }
 
+/** Which upstream answered a nutrition lookup. Drives the app's attribution. */
+export type NutritionSource = 'openfoodfacts' | 'usda' | 'deepseek';
+
+/** A lookup result plus the source that produced it, for ODbL attribution. */
+export interface SourcedNutrition {
+  nutrition: FoodNutrition;
+  source: NutritionSource;
+}
+
 interface FdcNutrient {
   nutrientId?: number;
   value?: number;
@@ -363,23 +372,34 @@ RULES:
  * USDA: branded items get real label values, everything else stays on the
  * reference database the app was built around. DeepSeek is the final safety
  * net, not a primary source.
+ *
+ * The result carries which source answered so the app can attribute OFF data
+ * correctly - OFF is ODbL-licensed and its attribution obligation attaches only
+ * when its data is actually used.
  */
 export function createBrandFirstNutritionLookup(deps: {
   usda: NutritionLookup;
   off: OffLookup;
   deepseek?: NutritionLookup;
-}): NutritionLookup {
+}): {
+  search(query: string): Promise<SourcedNutrition | null>;
+} {
   return {
-    async search(query: string): Promise<FoodNutrition | null> {
+    async search(query: string): Promise<SourcedNutrition | null> {
       const clean = sanitizeQuery(query);
-      if (!clean) return deps.usda.search(query);
+      if (!clean) {
+        const usda = await deps.usda.search(query);
+        return usda ? { nutrition: usda, source: 'usda' } : null;
+      }
 
       const brands = brandTokens(clean);
       if (brands.length === 0) {
         try {
-          return await deps.usda.search(query);
+          const usda = await deps.usda.search(query);
+          return usda ? { nutrition: usda, source: 'usda' } : null;
         } catch {
-          return deps.deepseek?.search(query) ?? null;
+          const deepseek = await deps.deepseek?.search(query);
+          return deepseek ? { nutrition: deepseek, source: 'deepseek' } : null;
         }
       }
 
@@ -389,12 +409,14 @@ export function createBrandFirstNutritionLookup(deps: {
       } catch {
         // OFF down doesn't fail the check - fall through to USDA below.
       }
-      if (branded) return branded;
+      if (branded) return { nutrition: branded, source: 'openfoodfacts' };
 
       try {
-        return await deps.usda.search(query);
+        const usda = await deps.usda.search(query);
+        return usda ? { nutrition: usda, source: 'usda' } : null;
       } catch {
-        return deps.deepseek?.search(query) ?? null;
+        const deepseek = await deps.deepseek?.search(query);
+        return deepseek ? { nutrition: deepseek, source: 'deepseek' } : null;
       }
     },
   };

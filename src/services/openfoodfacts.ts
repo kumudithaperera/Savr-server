@@ -16,7 +16,7 @@
  * `AppName/Version (ContactEmail)` form (see the API's Authentication
  * section). The contact email is injected per environment so OFF's operators
  * can reach us about misbehaving traffic instead of banning an IP; it lives in
- * `deps.contactEmail`, never the bundle. Three things otherwise shape it:
+ * `deps.contactEmail`, never the bundle. Beyond that, four things shape it:
  *
  *  - A "branded" query carries the brand name in the ingredient text, and we
  *    pass those tokens in. Candidates whose `brands` field confirms one of
@@ -26,6 +26,9 @@
  *  - OFF reports sodium (and salt) in *grams*, where the app's `FoodMicros`
  *    uses milligrams, and doesn't reliably carry vitamins or other minerals, so
  *    those micros come back zero and the breakdown UI omits them.
+ *  - OFF's search endpoint allows 10 requests/min/IP, so this lookup keeps a
+ *    per-minute budget and a short-lived result cache: over budget it returns
+ *    null (USDA answers instead) rather than risking an IP ban.
  *
  * Data is ODbL-licensed: the "Open Food Facts" credit the app shows next to
  * USDA is what satisfies its attribution requirement.
@@ -42,6 +45,26 @@ const OFF_APP_VERSION = '1.0';
 /** How many candidates to fetch. Hits are ranked by OFF, and we re-rank by completeness. */
 const OFF_PAGE_SIZE = 8;
 
+/**
+ * OFF caps search endpoints at 10 requests/min/IP, and every Morsel search
+ * leaves from the server's own IP no matter which user asked. One recipe with
+ * many branded ingredients could easily blow through that in a few seconds,
+ * and their docs reserve the right to IP-ban repeat offenders. So the lookup
+ * self-limits to a slightly lower budget per rolling minute and, once spent,
+ * declines further searches (returning null) so the combined lookup falls
+ * through to USDA instead of hammering OFF.
+ */
+const OFF_MAX_SEARCHES_PER_WINDOW = 8;
+const OFF_WINDOW_MS = 60_000;
+/**
+ * Identical ingredient queries repeat within a check (re-checks, the Plus
+ * breakdown screen re-running the same recipe) and across them, so results are
+ * memoized briefly. Hits don't consume the rate budget. Bounded so a long-lived
+ * server process can't grow the map forever.
+ */
+const OFF_CACHE_TTL_MS = 10 * 60_000;
+const OFF_CACHE_MAX_ENTRIES = 256;
+
 export interface OffLookupDeps {
   /**
    * Off-app contact address, sent in the `User-Agent` as OFF's Authentication
@@ -53,6 +76,8 @@ export interface OffLookupDeps {
   contactEmail?: string;
   /** Injectable so the service can be unit-tested without network. */
   fetchImpl?: typeof fetch;
+  /** Injectable clock for the rate-budget and cache tests. */
+  now?: () => number;
 }
 
 export interface OffLookup {
@@ -182,11 +207,38 @@ export function createOpenFoodFactsLookup(deps: OffLookupDeps = {}): OffLookup {
     ? `${OFF_APP_NAME}/${OFF_APP_VERSION} (${deps.contactEmail})`
     : `${OFF_APP_NAME}/${OFF_APP_VERSION} (no-contact-email)`;
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = deps.now ?? (() => Date.now());
+
+  const recentSearches: number[] = [];
+  const cache = new Map<string, { nutrition: FoodNutrition; cachedAt: number }>();
+
+  /** True when this search would still fit inside OFF's per-minute budget. */
+  function withinBudget(): boolean {
+    const t = now();
+    while (recentSearches.length > 0 && t - recentSearches[0] >= OFF_WINDOW_MS) {
+      recentSearches.shift();
+    }
+    return recentSearches.length < OFF_MAX_SEARCHES_PER_WINDOW;
+  }
 
   return {
     async search(query: string, options?: OffSearchOptions): Promise<FoodNutrition | null> {
       const clean = sanitizeQuery(query);
       if (!clean) return null;
+
+      const cacheKey = `${clean}|${(options?.brandTokens ?? []).slice().sort().join(',')}`;
+      const cached = cache.get(cacheKey);
+      if (cached && now() - cached.cachedAt < OFF_CACHE_TTL_MS) {
+        // Refresh insertion order so a hot entry isn't the first evicted.
+        cache.delete(cacheKey);
+        cache.set(cacheKey, cached);
+        return cached.nutrition;
+      }
+      if (cached) cache.delete(cacheKey);
+
+      // Budget spent for this minute: skip OFF rather than queueing (a wait
+      // would stall the user's nutrition check) and let USDA answer.
+      if (!withinBudget()) return null;
 
       const url =
         `${OFF_SEARCH}?q=${encodeURIComponent(clean)}` +
@@ -195,6 +247,7 @@ export function createOpenFoodFactsLookup(deps: OffLookupDeps = {}): OffLookup {
 
       let response: Response;
       try {
+        recentSearches.push(now());
         response = await fetchImpl(url, { headers: { 'User-Agent': userAgent } });
       } catch {
         throw upstreamError('Could not reach Open Food Facts. Please try again.');
@@ -217,8 +270,16 @@ export function createOpenFoodFactsLookup(deps: OffLookupDeps = {}): OffLookup {
       const usable = branded
         .filter((p) => caloriesOf(p) > 0)
         .sort((a, b) => completenessOf(b) - completenessOf(a))[0];
+      if (!usable) return null;
 
-      return usable ? toNutrition(usable) : null;
+      const nutrition = toNutrition(usable);
+      cache.set(cacheKey, { nutrition, cachedAt: now() });
+      while (cache.size > OFF_CACHE_MAX_ENTRIES) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
+      return nutrition;
     },
   };
 }

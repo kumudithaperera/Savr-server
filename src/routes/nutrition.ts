@@ -1,10 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 
-import type { NutritionLookup } from '../services/nutrition.js';
+import type { SourcedNutrition } from '../services/nutrition.js';
 import { requireQuery } from '../lib/query.js';
 
 interface NutritionDeps {
-  nutrition: NutritionLookup;
+  nutrition: {
+    search(query: string): Promise<SourcedNutrition | null>;
+  };
 }
 
 interface NutritionBody {
@@ -12,10 +14,13 @@ interface NutritionBody {
 }
 
 /**
- * Registers `POST /nutrition`. Body: `{ query }`. Returns `{ macros, micros }` -
- * the per-100 g macros and micronutrients for the best-matching food, or both
- * null when nothing matched, which the app treats as "skip this ingredient"
- * (macros) / "no breakdown to show" (micros).
+ * Registers `POST /nutrition`. Body: `{ query }`. Returns `{ macros, micros,
+ * source }` - the per-100 g macros and micronutrients for the best-matching
+ * food plus which upstream answered (`openfoodfacts`, `usda` or `deepseek`),
+ * or all null when nothing matched, which the app treats as "skip this
+ * ingredient" (macros) / "no breakdown to show" (micros). `source` lets the app
+ * credit Open Food Facts only when its data was actually used - its ODbL
+ * license attaches attribution to use, and USDA/DeepSeek need no credit.
  *
  * The lookup answers via a brand-first, two-source chain: Open Food Facts when
  * the ingredient names a specific branded product (verified against the brand,
@@ -35,6 +40,8 @@ export function registerNutritionRoute(app: FastifyInstance, deps: NutritionDeps
     const query = requireQuery(request.body?.query);
 
     const nutrition = await deps.nutrition.search(query);
-    return nutrition ?? { macros: null, micros: null };
+    return nutrition
+      ? { ...nutrition.nutrition, source: nutrition.source }
+      : { macros: null, micros: null, source: null };
   });
 }

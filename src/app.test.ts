@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type AppDeps } from './app.js';
+import type { SourcedNutrition } from './services/nutrition.js';
 import { unprocessable, upstreamError } from './lib/errors.js';
 import type { IntegrityOutcome } from './lib/integrity.js';
 import type { ScrapedPost } from './lib/types.js';
@@ -58,7 +59,12 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     parser: { parse: vi.fn(async () => parsed) },
     improver: {} as AppDeps['improver'],
     photoSearch: { search: vi.fn(async () => 'https://images.example/photo.jpg') },
-    nutrition: { search: vi.fn(async () => ({ macros, micros })) },
+    nutrition: {
+      search: vi.fn(async (): Promise<SourcedNutrition | null> => ({
+        nutrition: { macros, micros },
+        source: 'usda',
+      })),
+    },
     appSharedSecret: '',
     ...overrides,
   };
@@ -669,7 +675,7 @@ describe('POST /nutrition', () => {
       payload: { query: 'apple' },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ macros, micros });
+    expect(res.json()).toEqual({ macros, micros, source: 'usda' });
     expect(deps.nutrition.search).toHaveBeenCalledWith('apple');
     await app.close();
   });
@@ -682,7 +688,7 @@ describe('POST /nutrition', () => {
       payload: { query: 'nonsense' },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ macros: null, micros: null });
+    expect(res.json()).toEqual({ macros: null, micros: null, source: null });
     await app.close();
   });
 

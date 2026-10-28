@@ -84,4 +84,48 @@ describe('createOpenFoodFactsLookup', () => {
 
     await expect(lookup.search('Barilla spaghetti')).resolves.toBeNull();
   });
+
+  it('serves a repeat query from cache without a second request', async () => {
+    const fetchImpl = hitFetch([PLAIN_HIT]);
+    const lookup = createOpenFoodFactsLookup({ contactEmail: 'ops@morsel.app', fetchImpl });
+
+    const first = await lookup.search('Barilla spaghetti', { brandTokens: ['barilla'] });
+    const second = await lookup.search('Barilla spaghetti', { brandTokens: ['barilla'] });
+    expect(second).toEqual(first);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops searching OFF once the per-minute budget is spent, instead of risking a ban', async () => {
+    const fetchImpl = hitFetch([PLAIN_HIT]);
+    let t = 0;
+    const lookup = createOpenFoodFactsLookup({ contactEmail: 'ops@morsel.app', fetchImpl, now: () => t });
+
+    // The budget allows 8 searches per rolling minute; distinct queries only,
+    // since repeats are served from cache.
+    for (let i = 0; i < 8; i++) {
+      const r = await lookup.search(`Barilla product ${i}`, { brandTokens: ['barilla'] });
+      expect(r?.macros.caloriesPer100g).toBe(359);
+    }
+    // 9th distinct query inside the window: declined so USDA answers instead.
+    await expect(lookup.search('Barilla product 9', { brandTokens: ['barilla'] })).resolves.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(8);
+
+    // A minute later the budget resets and OFF answers again.
+    t = 61_000;
+    await expect(lookup.search('Barilla product 9', { brandTokens: ['barilla'] })).resolves.toMatchObject({
+      macros: { caloriesPer100g: 359 },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(9);
+  });
+
+  it('expires cached results after the TTL and searches again', async () => {
+    const fetchImpl = hitFetch([PLAIN_HIT]);
+    let t = 0;
+    const lookup = createOpenFoodFactsLookup({ contactEmail: 'ops@morsel.app', fetchImpl, now: () => t });
+
+    await lookup.search('Barilla spaghetti', { brandTokens: ['barilla'] });
+    t = 10 * 60_000 + 1;
+    await lookup.search('Barilla spaghetti', { brandTokens: ['barilla'] });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 });

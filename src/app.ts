@@ -7,7 +7,7 @@ import type { VideoRecipeParser } from './services/gemini-video.js';
 import type { PhotoSearch } from './services/images.js';
 import type { FoodProfiler } from './services/food-profiles.js';
 import type { RecipeImprover } from './services/improve.js';
-import type { NutritionLookup } from './services/nutrition.js';
+import type { SourcedNutrition } from './services/nutrition.js';
 import type { ContentModerator } from './services/moderation.js';
 import type { TikTokScraper } from './services/tiktok.js';
 import type { WebScraper } from './services/web.js';
@@ -66,7 +66,9 @@ export interface AppDeps {
   /** Backs `/image-search`, holding the Pexels key the app used to ship. */
   photoSearch: PhotoSearch;
   /** Backs `/nutrition`, holding the USDA key the app used to ship. */
-  nutrition: NutritionLookup;
+  nutrition: {
+    search(query: string): Promise<SourcedNutrition | null>;
+  };
   /** Shared secret guarding the expensive routes; empty disables the check (dev). */
   appSharedSecret: string;
   /** Play Integrity attestation on `/extract` and `/improve`. Omitted = off (dev, tests). */
